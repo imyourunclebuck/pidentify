@@ -1,6 +1,6 @@
 # pidentify fleet
 
-Device and network facts for the Jetson Camera Wall and the Raspberry Pi camera nodes. Verified October 25, 2026. Tailnet IPs are not assigned here yet. This file has no secrets.
+Device and network facts for the Jetson Camera Wall and the Raspberry Pi camera nodes. Verified October 25, 2026. Tailnet IPv4 addresses were verified October 25, 2026 at 5:05 AM ET. This file has no secrets.
 
 ## Sites
 
@@ -15,18 +15,19 @@ The office is a separate physical site. The Jetson cannot reach 192.168.2.x dire
 
 ## Remote access
 
-Tailscale tailnet on Aaron's account, with MagicDNS (`--accept-dns`).
+Tailscale tailnet on Aaron's account, with MagicDNS (`--accept-dns`). Tailscale 1.104.2 is already installed and logged in on all five Pis and the Jetson. install.sh does not install it.
 
 | Role | Tailnet hostname | Tailnet IPv4 |
 | --- | --- | --- |
-| Jetson Camera Wall | jetson-camwall | TBD |
-| GrokBot | grokbot-pi5 | TBD |
-| TEST pi | pi5-test-hq | TBD |
-| Myrtle cam 1 | pi5-cam-1-myrtle | TBD |
-| Myrtle cam 2 | pi5-cam-2-myrtle | TBD |
-| Myrtle cam 3 | pi5-cam-3-myrtle | TBD |
+| Jetson Camera Wall | jetson-camwall | 100.123.2.92 |
+| GrokBot | grokbot-pi5 | 100.83.57.70 |
+| TEST pi | pi5-test-hq | 100.78.74.47 |
+| Myrtle cam 1 | pi5-cam-1-myrtle | 100.91.138.55 |
+| Myrtle cam 2 | pi5-cam-2-myrtle | 100.83.252.55 |
+| Myrtle cam 3 | pi5-cam-3-myrtle | 100.105.161.77 |
+| Aaron's iPhone | iphone181 | 100.118.190.44 |
 
-Tailnet IPs are TBD and get filled in as devices join. There is no port forwarding. Streams are LAN and tailnet only. A future ACL tag is `tag:cam`.
+There is no port forwarding. Streams are LAN and tailnet only. A future ACL tag is `tag:cam`.
 
 ## Devices
 
