@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 from datetime import datetime, timezone
 
 from pidentify import SERVICE_PORTS
@@ -550,11 +551,12 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.output, "w", encoding="utf-8") as handle:
             handle.write(encoded + "\n")
     if args.json and not args.output:
+        # stdout is the JSON document. Status and other callers capture it.
         print(encoded)
     else:
-        print(format_report(report))
+        print(format_report(report), file=sys.stderr)
         for action in actions:
-            print(format_action_line(action))
+            print(format_action_line(action), file=sys.stderr)
     # Exit 0 when the scan itself succeeded. Callers read the JSON to see
     # whether anything is still in the way; a conflict is not a scanner error.
     return 0

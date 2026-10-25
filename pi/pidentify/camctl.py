@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import URLError
@@ -254,7 +255,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[camctl] {self.address_string()} {fmt % args}")
+        print(f"[camctl] {self.address_string()} {fmt % args}", file=sys.stderr)
 
 
 def make_server(app: CamctlApp, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
@@ -267,7 +268,7 @@ def make_server(app: CamctlApp, host: str = "127.0.0.1", port: int = 0) -> Threa
 def serve(host: str = BIND, port: int = PORT, config_dir: str = CONFIG_DIR) -> None:
     app = CamctlApp(config_dir=config_dir)
     server = make_server(app, host, port)
-    print(f"[camctl] listening on {host}:{server.server_address[1]} config={config_dir}")
+    print(f"[camctl] listening on {host}:{server.server_address[1]} config={config_dir}", file=sys.stderr)
 
     def _stop(_signum, _frame) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()

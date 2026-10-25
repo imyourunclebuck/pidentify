@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 
 _CAM_LINE = re.compile(
@@ -173,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         for camera in result["cameras"]:
             print(f"{camera['id']}: {camera['model']} {camera.get('device', '')}")
         for warning in result["warnings"]:
-            print(f"warning: {warning}")
+            print(f"warning: {warning}", file=sys.stderr)
     return 0 if result["ok"] else 1
 
 

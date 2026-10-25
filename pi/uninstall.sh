@@ -14,8 +14,10 @@ set -euo pipefail
 
 LOG_FILE=""
 
+# Same rule as install.sh: progress on stderr, so a command substitution
+# never picks up a log line.
 say() {
-  printf '%s\n' "$*"
+  printf '%s\n' "$*" >&2
   if [[ -n "${LOG_FILE}" && -w "${LOG_FILE}" ]]; then
     printf '%s\n' "$*" >>"${LOG_FILE}"
   fi

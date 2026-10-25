@@ -261,20 +261,21 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"system hostname: {summary['system_hostname']}")
-    print(f"node: {summary['node']}")
-    print(f"mdns: {summary['mdns_fqdn']}")
-    print(f"mode: {summary['mode']}")
+    print(f"system hostname: {summary['system_hostname']}", file=sys.stderr)
+    print(f"node: {summary['node']}", file=sys.stderr)
+    print(f"mdns: {summary['mdns_fqdn']}", file=sys.stderr)
+    print(f"mode: {summary['mode']}", file=sys.stderr)
     if summary["cameras"]:
         for camera in summary["cameras"]:
             print(
                 f"camera {camera.get('id')}: {camera.get('model')} "
-                f"({camera.get('modes')}) {camera.get('device')}"
+                f"({camera.get('modes')}) {camera.get('device')}",
+                file=sys.stderr,
             )
     else:
-        print("cameras: none")
+        print("cameras: none", file=sys.stderr)
     for warning in summary["warnings"]:
-        print(f"warning: {warning}")
+        print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 

@@ -146,6 +146,6 @@ python3 -m unittest discover -s pi/tests -v
 shellcheck -x pi/install.sh pi/uninstall.sh pi/bin/*
 ```
 
-`PIDENTIFY_ROOT` is a dry-run: no apt, useradd, or systemctl, and `--take-over` is ignored. `PIDENTIFY_SKIP_DOWNLOAD=1` skips the arm64 MediaMTX binary (required off a Pi). `PIDENTIFY_HOSTNAME` and `PIDENTIFY_LIST_CAMERAS_FILE` feed the hostname and a saved `rpicam-hello` transcript.
+`PIDENTIFY_ROOT` is a dry-run: no apt, useradd, or systemctl, and `--take-over` is ignored. `PIDENTIFY_SKIP_DOWNLOAD=1` skips the arm64 MediaMTX binary (required off a Pi). `PIDENTIFY_HOSTNAME` and `PIDENTIFY_LIST_CAMERAS_FILE` feed the hostname and a saved `rpicam-hello` transcript. `PIDENTIFY_ARCHIVE_URL` is a `file://` or `http://` tarball used instead of GitHub when the piped script has to download the rest of `pi/`. Installer progress is written to stderr so that download step can print the extracted path on stdout.
 
 Not tested on a Pi: a real `rpicam-vid`, the arm64 MediaMTX process, an Avahi restart, systemd user and groups, ffprobe against a live path, apt install and remove, or a Jetson client that only speaks RTSP/UDP. TCP-only RTSP is deliberate. The first viewer can wait up to `runOnDemandStartTimeout` (20s) while the camera opens.

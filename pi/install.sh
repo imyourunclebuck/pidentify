@@ -72,8 +72,11 @@ die() {
   exit 1
 }
 
+# Progress goes to stderr. Command substitutions in this script only capture
+# values (paths, counts, hostnames). A log line on stdout is how the piped
+# bootstrap once exec'd "trying https://..." as if it were the install path.
 say() {
-  printf '%s\n' "$*"
+  printf '%s\n' "$*" >&2
   if [[ -n "${LOG_FILE}" && -w "${LOG_FILE}" ]]; then
     printf '%s\n' "$*" >>"${LOG_FILE}"
   fi
@@ -129,12 +132,18 @@ ensure_log() {
 }
 
 fetch_source() {
+  # stdout is only the extracted pi/ directory. Callers use
+  # src="$(fetch_source ref)", so nothing else may be written to stdout.
   local ref="$1"
   local tmp archive url src ok
   tmp="$(mktemp -d /tmp/pidentify-src.XXXXXX)"
   archive="${tmp}/src.tar.gz"
   ok=0
-  local urls=(
+  local urls=()
+  if [[ -n "${PIDENTIFY_ARCHIVE_URL:-}" ]]; then
+    urls+=("${PIDENTIFY_ARCHIVE_URL}")
+  fi
+  urls+=(
     "https://github.com/${REPO}/archive/refs/heads/${ref}.tar.gz"
     "https://github.com/${REPO}/archive/refs/tags/${ref}.tar.gz"
     "https://github.com/${REPO}/archive/${ref}.tar.gz"
@@ -188,6 +197,9 @@ maybe_reexec() {
   say "==> Downloading pidentify ${ref} so the installer can read the rest of pi/"
   local src
   src="$(fetch_source "${ref}")"
+  if [[ "${src}" == *$'\n'* || ! -f "${src}/install.sh" ]]; then
+    die "bootstrap returned a bad path: ${src}"
+  fi
   export PIDENTIFY_BOOTSTRAPPED=1
   export PIDENTIFY_SRC_TEMP=1
   exec bash "${src}/install.sh" "$@"
@@ -528,7 +540,7 @@ step "Look for port and camera conflicts"
 conflict_file="$(dest /var/lib/pidentify/conflicts.json)"
 do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts --json --output "${conflict_file}"
 say "Conflict report:"
-do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts || true
+do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts >&2 || true
 conflict_count="$(py -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("conflicts") or []))' "${conflict_file}")"
 if [[ "${TAKE_OVER}" -eq 1 && "${conflict_count}" -gt 0 ]]; then
   say "Stopping conflicting processes (--take-over). This does not uninstall them."
@@ -540,7 +552,7 @@ if [[ "${TAKE_OVER}" -eq 1 && "${conflict_count}" -gt 0 ]]; then
   say "Take-over log: $(dest /var/lib/pidentify/takeover.log)"
   if [[ -f "$(dest /var/lib/pidentify/takeover.log)" ]]; then
     say "---- takeover.log ----"
-    cat "$(dest /var/lib/pidentify/takeover.log)"
+    cat "$(dest /var/lib/pidentify/takeover.log)" >&2
     say "---- end ----"
   fi
   conflict_count="$(py -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("conflicts") or []))' "${conflict_file}")"
