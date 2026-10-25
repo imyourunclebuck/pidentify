@@ -1,0 +1,5 @@
+Available cameras
+-----------------
+1 : imx219 [3280x2464] (/base/soc/i2c0mux/i2c@1/imx219@10)
+    Modes: 'SRGGB10_CSI2P' : 1640x1232
+2 : unexpected [640x480] (/dev/not-a-csi-port)

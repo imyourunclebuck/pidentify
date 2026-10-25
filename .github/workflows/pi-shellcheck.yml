@@ -1,0 +1,43 @@
+name: pi shellcheck
+
+on:
+  push:
+    paths:
+      - "pi/**"
+      - ".github/workflows/pi-shellcheck.yml"
+  pull_request:
+    paths:
+      - "pi/**"
+      - ".github/workflows/pi-shellcheck.yml"
+
+jobs:
+  pi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: shellcheck -x pi/install.sh pi/uninstall.sh pi/tests/bootstrap_pipe.sh pi/bin/pidentify-publish pi/bin/pidentify-push pi/bin/pidentify-camctl pi/bin/pidentify-status
+      - name: unit tests
+        run: python3 -m unittest discover -s pi/tests -v
+      - name: piped bootstrap
+        run: bash pi/tests/bootstrap_pipe.sh
+
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: byte-compile
+        run: python -m compileall -q pi
+      - name: unit tests
+        run: python -m unittest discover -s pi/tests -v
+      - name: piped bootstrap
+        run: bash pi/tests/bootstrap_pipe.sh

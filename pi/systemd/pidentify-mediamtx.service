@@ -1,0 +1,25 @@
+[Unit]
+Description=pidentify MediaMTX RTSP broker
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pidentify
+Group=pidentify
+SupplementaryGroups=video render
+ExecStart=/opt/pidentify/mediamtx /etc/pidentify/mediamtx.yml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+# ProtectHome hides /home. The camera stack does not need it. Do not set
+# PrivateDevices: rpicam-vid, started from this process, needs /dev/video*.
+ProtectHome=true
+UMask=0022
+WorkingDirectory=/var/lib/pidentify
+
+[Install]
+WantedBy=multi-user.target

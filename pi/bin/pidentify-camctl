@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Local camera-control API. See pi/README.md.
+set -euo pipefail
+export PYTHONPATH="/opt/pidentify${PYTHONPATH:+:$PYTHONPATH}"
+if [[ -x /usr/bin/python3 ]]; then
+  exec /usr/bin/python3 -m pidentify.camctl "$@"
+fi
+exec python3 -m pidentify.camctl "$@"
