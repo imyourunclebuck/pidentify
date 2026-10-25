@@ -139,7 +139,7 @@ Authentication is off unless `/etc/pidentify/config` sets `control_token`. Then 
 | bitrate | 100000–25000000. Default 2000000 |
 | keyframe_interval | frames 1–300, or null to use fps |
 | x264_preset | ultrafast (default), superfast, veryfast, faster, fast, medium |
-| x264_tune | zerolatency (default), film, animation, grain, fastdecode. Passed as `--libav-video-codec-opts` on Pi 5. A Pi 4 hardware encoder stores them and does not send them |
+| x264_tune | zerolatency (default), film, animation, grain, fastdecode. On Pi 5 this is one argv element, `preset=NAME;tune=NAME`. rpicam-apps splits that string on `;`; a colon is part of the preset name and x264 rejects it. An unknown tune is omitted so the stream still starts. A Pi 4 hardware encoder stores the names and does not send them |
 | hdr | off, auto, sensor, single-exp. JSON `true` is auto and `false` is off. imx708 only, and only at 2304x1296. Applying it restarts the camera. Other sensors get 400 |
 | denoise | auto, off, cdn_off, cdn_fast, cdn_hq, or null |
 | hflip, vflip | booleans. Default false |

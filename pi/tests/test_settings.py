@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from pidentify.sensors import X264_PRESETS, X264_TUNES  # noqa: E402
 from pidentify.settings import (  # noqa: E402
     SettingsError,
     build_autofocus_argv,
@@ -18,6 +19,7 @@ from pidentify.settings import (  # noqa: E402
     build_rpicam_argv,
     build_snapshot_argv,
     default_settings,
+    libav_video_codec_opts,
     load_settings,
     merge_patch,
     public_settings,
@@ -158,7 +160,7 @@ class SettingsTest(unittest.TestCase):
                 "--libav-format",
                 "mpegts",
                 "--libav-video-codec-opts",
-                "preset=ultrafast:tune=zerolatency",
+                "preset=ultrafast;tune=zerolatency",
                 "--width",
                 "1280",
                 "--height",
@@ -223,7 +225,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(cfg["x264_tune"], "zerolatency")
         self.assertEqual(cfg["keyframe_interval"], 30)
         argv = build_rpicam_argv(0, cfg, encoder="libav", low_latency=False)
-        self.assertEqual(argv[argv.index("--libav-video-codec-opts") + 1], "preset=ultrafast:tune=zerolatency")
+        self.assertEqual(argv[argv.index("--libav-video-codec-opts") + 1], "preset=ultrafast;tune=zerolatency")
         self.assertEqual(argv[argv.index("--width") + 1], "1920")
         self.assertEqual(argv[argv.index("--intra") + 1], "30")
         self.assertEqual(argv[argv.index("--denoise") + 1], "cdn_fast")
@@ -298,6 +300,108 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(record[record.index("-c") + 1], "copy")
         self.assertTrue(record[-1].endswith(".mp4"))
         self.assertNotIn("rpicam", " ".join(record))
+
+    def test_quality_presets_pass_semicolon_codec_opts_as_one_argv(self):
+        expected = {
+            "low": ("640", "480", "15", "800000", "15"),
+            "medium": ("1280", "720", "30", "2000000", "30"),
+            "high": ("1920", "1080", "30", "5000000", "30"),
+        }
+        for name, (width, height, fps, bitrate, intra) in expected.items():
+            cfg = merge_patch(default_settings(), {"quality": name}, camera=IMX708)
+            argv = build_rpicam_argv(0, cfg, binary="rpicam-vid", encoder="libav", low_latency=False)
+            opts = "preset=ultrafast;tune=zerolatency"
+            self.assertEqual(
+                argv,
+                [
+                    "rpicam-vid",
+                    "-t",
+                    "0",
+                    "-n",
+                    "--camera",
+                    "0",
+                    "--codec",
+                    "libav",
+                    "--libav-video-codec",
+                    "libx264",
+                    "--libav-format",
+                    "mpegts",
+                    "--libav-video-codec-opts",
+                    opts,
+                    "--width",
+                    width,
+                    "--height",
+                    height,
+                    "--framerate",
+                    fps,
+                    "--bitrate",
+                    bitrate,
+                    "--intra",
+                    intra,
+                    "--flush",
+                    "-o",
+                    "-",
+                ],
+            )
+            index = argv.index("--libav-video-codec-opts")
+            self.assertEqual(argv[index + 1], opts)
+            self.assertNotIn(":", argv[index + 1])
+            self.assertEqual(argv.count(opts), 1)
+
+    def test_codec_opts_join_every_known_preset_and_tune_on_semicolon(self):
+        for preset in X264_PRESETS:
+            for tune in X264_TUNES:
+                opts = libav_video_codec_opts(preset, tune)
+                self.assertEqual(opts, "preset={0};tune={1}".format(preset, tune))
+                self.assertNotIn(":", opts)
+        self.assertEqual(libav_video_codec_opts("ultrafast", None), "preset=ultrafast")
+        self.assertEqual(libav_video_codec_opts("ultrafast", "not-a-tune"), "preset=ultrafast")
+        self.assertEqual(libav_video_codec_opts("placebo", "zerolatency"), "tune=zerolatency")
+        self.assertEqual(
+            libav_video_codec_opts("ultrafast:tune=zerolatency", "zerolatency"),
+            "tune=zerolatency",
+        )
+        self.assertIsNone(libav_video_codec_opts("placebo", "not-a-tune"))
+        self.assertIsNone(libav_video_codec_opts(None, None))
+
+    def test_rejected_preset_or_tune_still_builds_a_stream(self):
+        bad_tune = dict(default_settings())
+        bad_tune["x264_tune"] = "not-a-tune"
+        argv = build_rpicam_argv(0, bad_tune, binary="rpicam-vid", encoder="libav", low_latency=False)
+        self.assertEqual(argv[-2:], ["-o", "-"])
+        self.assertEqual(argv[argv.index("--codec") + 1], "libav")
+        opts = argv[argv.index("--libav-video-codec-opts") + 1]
+        self.assertEqual(opts, "preset=ultrafast")
+        self.assertNotIn(";", opts)
+        self.assertNotIn(":", opts)
+
+        bad_preset = dict(default_settings())
+        bad_preset["x264_preset"] = "ultrafast:tune=zerolatency"
+        argv = build_rpicam_argv(0, bad_preset, binary="rpicam-vid", encoder="libav", low_latency=False)
+        self.assertEqual(argv[-2:], ["-o", "-"])
+        self.assertEqual(
+            argv[argv.index("--libav-video-codec-opts") + 1],
+            "preset=ultrafast;tune=zerolatency",
+        )
+
+        both = dict(default_settings())
+        both["x264_preset"] = "placebo"
+        both["x264_tune"] = "stillimage"
+        argv = build_rpicam_argv(0, both, binary="rpicam-vid", encoder="libav", low_latency=False)
+        self.assertEqual(argv[-2:], ["-o", "-"])
+        self.assertEqual(argv[argv.index("--libav-video-codec-opts") + 1], "preset=ultrafast")
+        self.assertNotIn("--libav-video-codec-opts", build_rpicam_argv(0, both, encoder="hardware"))
+
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"x264_preset": "placebo"})
+        self.assertIn("ultrafast", caught.exception.fields["x264_preset"])
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"x264_tune": "stillimage"})
+        self.assertIn("zerolatency", caught.exception.fields["x264_tune"])
+        omitted = merge_patch(default_settings(), {"x264_tune": None})
+        self.assertIsNone(omitted["x264_tune"])
+        argv = build_rpicam_argv(0, omitted, encoder="libav", low_latency=False)
+        self.assertEqual(argv[argv.index("--libav-video-codec-opts") + 1], "preset=ultrafast")
 
 
 if __name__ == "__main__":

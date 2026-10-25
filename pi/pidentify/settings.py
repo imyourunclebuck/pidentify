@@ -268,8 +268,10 @@ def normalize_settings(
     out["hdr"] = None if merged["hdr"] is None else _optional_hdr(merged["hdr"])
     out["quality"] = _optional_choice(merged["quality"], "quality", QUALITY_NAMES)
     out["keyframe_interval"] = _optional_int(merged["keyframe_interval"], "keyframe_interval", low=1, high=300)
-    out["x264_preset"] = _required_choice(merged["x264_preset"], "x264_preset", X264_PRESETS)
-    out["x264_tune"] = _required_choice(merged["x264_tune"], "x264_tune", X264_TUNES)
+    # A name x264 will not accept must not abort the publisher. The HTTP API
+    # rejects those names before this runs; a hand-edited file is coerced.
+    out["x264_preset"] = _coerce_x264_preset(merged.get("x264_preset"))
+    out["x264_tune"] = _coerce_x264_tune(merged.get("x264_tune"))
     out["denoise"] = _optional_choice(merged["denoise"], "denoise", DENOISE_MODES)
     out["exposure"] = _optional_choice(merged["exposure"], "exposure", EXPOSURE_MODES)
     out["metering"] = _optional_choice(merged["metering"], "metering", METERING_MODES)
@@ -319,6 +321,40 @@ def _required_choice(value: Any, name: str, choices: tuple[str, ...]) -> str:
     if not isinstance(value, str) or value not in choices:
         raise SettingsError("invalid settings", {name: "expected one of {0}".format(", ".join(choices))})
     return value
+
+
+def _coerce_x264_preset(value: Any) -> str:
+    if isinstance(value, str) and value in X264_PRESETS:
+        return value
+    return "ultrafast"
+
+
+def _coerce_x264_tune(value: Any) -> str | None:
+    if isinstance(value, str) and value in X264_TUNES:
+        return value
+    return None
+
+
+def libav_video_codec_opts(preset: Any, tune: Any) -> str | None:
+    """One argv element for ``--libav-video-codec-opts``.
+
+    rpicam-apps splits this on ``;`` in ``encoder/libav_encoder.cpp`` and
+    passes each ``key=value`` to ``av_opt_set``. A colon stays inside the
+    preset, so ``preset=ultrafast:tune=zerolatency`` is the preset name x264
+    rejects. An unknown tune is left out. An unknown preset is left out too,
+    and if neither name is known the flag is omitted so rpicam-vid still
+    starts with its own libx264 defaults.
+    """
+    safe_preset = preset if isinstance(preset, str) and preset in X264_PRESETS else None
+    safe_tune = tune if isinstance(tune, str) and tune in X264_TUNES else None
+    parts = []
+    if safe_preset:
+        parts.append("preset={0}".format(safe_preset))
+    if safe_tune:
+        parts.append("tune={0}".format(safe_tune))
+    if not parts:
+        return None
+    return ";".join(parts)
 
 
 def _optional_gains(value: Any) -> list[float] | None:
@@ -383,6 +419,20 @@ def merge_patch(
     unknown = sorted(set(patch) - set(SETTING_KEYS))
     if unknown:
         raise SettingsError("invalid settings", {key: "unknown setting" for key in unknown})
+    if "x264_preset" in patch and (
+        not isinstance(patch["x264_preset"], str) or patch["x264_preset"] not in X264_PRESETS
+    ):
+        raise SettingsError(
+            "invalid settings",
+            {"x264_preset": "expected one of {0}".format(", ".join(X264_PRESETS))},
+        )
+    if "x264_tune" in patch and patch["x264_tune"] is not None and (
+        not isinstance(patch["x264_tune"], str) or patch["x264_tune"] not in X264_TUNES
+    ):
+        raise SettingsError(
+            "invalid settings",
+            {"x264_tune": "expected one of {0}".format(", ".join(X264_TUNES))},
+        )
     applied = dict(patch)
     if "awbgains" in applied and applied["awbgains"] is not None:
         awb = applied["awb"] if "awb" in applied else current.get("awb")
@@ -559,13 +609,11 @@ def build_rpicam_argv(
     else:
         argv += ["--codec", "h264"]
     if encoder == "libav":
-        argv += [
-            "--libav-video-codec-opts",
-            "preset={preset}:tune={tune}".format(
-                preset=cfg["x264_preset"],
-                tune=cfg["x264_tune"],
-            ),
-        ]
+        # A single list element. publish.py execs this argv; nothing is passed
+        # through a shell, so the semicolon is not a command separator.
+        opts = libav_video_codec_opts(cfg.get("x264_preset"), cfg.get("x264_tune"))
+        if opts:
+            argv += ["--libav-video-codec-opts", opts]
     gop = cfg["keyframe_interval"] if cfg["keyframe_interval"] is not None else cfg["fps"]
     argv += [
         "--width",
