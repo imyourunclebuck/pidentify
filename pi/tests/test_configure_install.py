@@ -158,7 +158,15 @@ class InstallDryRunTest(unittest.TestCase):
             self.assertFalse((root / "boot" / "firmware" / "config.txt").exists())
             if before is not None:
                 self.assertEqual(hashlib.sha256(hostname_file.read_bytes()).hexdigest(), before)
+            wp = root / "etc" / "wireplumber" / "wireplumber.conf.d" / "50-pidentify-no-camera.conf"
+            lua = root / "etc" / "wireplumber" / "main.lua.d" / "51-pidentify-no-camera.lua"
+            wp.parent.mkdir(parents=True)
+            lua.parent.mkdir(parents=True)
+            wp.write_text("wireplumber.profiles = { main = { monitor.libcamera = disabled } }\n", encoding="utf-8")
+            lua.write_text("libcamera_monitor.enabled = false\n", encoding="utf-8")
             subprocess.run(["bash", str(PI / "uninstall.sh")], check=True, env=env, cwd=str(REPO))
+            self.assertFalse(wp.exists())
+            self.assertFalse(lua.exists())
             self.assertFalse((root / "etc" / "pidentify").exists())
             self.assertFalse((root / "opt" / "pidentify").exists())
             self.assertFalse((root / "etc" / "systemd" / "system" / "pidentify-mediamtx.service").exists())

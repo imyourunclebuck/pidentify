@@ -77,6 +77,16 @@ class CamctlTest(unittest.TestCase):
     def tearDown(self):
         self._dir.cleanup()
 
+    def test_root_is_an_endpoint_index(self):
+        status, body = self.app.dispatch("GET", "/", None, "127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["service"], "pidentify-camctl")
+        paths = [item["path"] for item in body["endpoints"]]
+        self.assertIn("/health", paths)
+        self.assertIn("/cameras", paths)
+        self.assertIn("/cameras/{id}/settings", paths)
+        self.assertIn("/cameras/{id}/restart", paths)
+
     def test_health_and_lan_rejection(self):
         status, body = self.app.dispatch("GET", "/health", None, "127.0.0.1")
         self.assertEqual(status, 200)

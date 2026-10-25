@@ -65,7 +65,11 @@ Default picture: H.264, 1280x720@30, about 2 Mbps. `runOnDemand` in local mode o
 
 ### Why ffmpeg sits between rpicam-vid and MediaMTX
 
-`rpicam-vid --codec h264` is the hardware encoder. Its reliable sink on Bookworm is an elementary stream on stdout (`-o -`), with `--inline`, `--flush`, `-t 0`, and `-n`. `--low-latency` is added only when that binary's `--help` lists it (Bookworm's rpicam-apps 1.5 has `--flush` and does not have `--low-latency`). ffmpeg copies that stream into `rtsp://127.0.0.1:8554/<path>` over TCP and does not re-encode. MediaMTX's native `rpiCamera` source is not used, because the Jetson contract is `runOnDemand` plus rpicam-vid flags. `--codec libav` over MPEG-TS/UDP would change encoder selection and open extra ports.
+The on-disk hook stays `/usr/local/bin/pidentify-publish camN` (runOnDemand locally, runOnInit in push mode). That process picks the encoder from the board and pipes stdout to ffmpeg, which copies H.264 to `rtsp://127.0.0.1:8554/<path>` over TCP and does not re-encode. Push mode uses the same publisher; `pidentify-push` only copies the local RTSP path onward.
+
+Pi 5 has no hardware H.264 encoder. `rpicam-vid --codec h264` still enters libav there, and `-o -` fails unless `--libav-format` is set (`Unable to choose output format for '-'`). Pi 5 therefore runs `--codec libav --libav-video-codec libx264 --libav-format mpegts -o -`, and ffmpeg reads `-f mpegts` with a 5 MB probe and a 2 s analyze window so the picture size is known. `--low-latency` is added when `rpicam-vid --help` lists it (Trixie does; Bookworm's rpicam-apps 1.5 has `--flush` and does not).
+
+Pi 4, Pi 400, CM4, and earlier boards that report an H.264 block use `--codec h264 --inline --flush -o -`. ffmpeg reads that elementary stream with `-f h264 -framerate <fps>`. An unrecognised board uses the Pi 5 libav path, which still produces H.264. `PIDENTIFY_ENCODER=hardware|libav` overrides detection. MediaMTX's native `rpiCamera` source is not used.
 
 ### Names
 
@@ -100,6 +104,7 @@ Stdlib Python on `:8555`. No authentication. Partial JSON merge, not a full repl
 
 | Method | Path | Result |
 | --- | --- | --- |
+| GET | `/` | JSON index of the endpoints below |
 | GET | `/health` | `{"ok": true, ...}` |
 | GET | `/cameras` | detected cameras, settings, `streaming` |
 | GET | `/cameras/<id>` | one camera |
@@ -131,11 +136,15 @@ Stdlib Python on `:8555`. No authentication. Partial JSON merge, not a full repl
 
 Before it starts anything, install looks for listeners on 8554, 8555, and 9997 and for processes holding `/dev/video*` or `/dev/media*` (a Picamera2 app such as `~/Desktop/app_full.py`, an existing `rpicam-vid`, or another mediamtx). It prints them and does not stop them. The units are still installed and enabled, but they are left stopped, so a reboot can race a program that is also enabled.
 
-`--take-over` stops those processes. It does not uninstall or disable them. Each action is appended to `/var/lib/pidentify/takeover.log` with a reverse command (`systemctl start UNIT`, or restart a bare process by hand). It will not stop ssh, systemd, `user@` (that would kill the Pi Connect shell), Avahi, NetworkManager, or the installer's own parent processes. Its own units are not treated as conflicts. If anything is still holding a camera or port afterward, the new units stay stopped.
+Listeners that belong to `pidentify-mediamtx`, `pidentify-camctl`, or the `pidentify` user are ours, including when `ss -p` cannot see the pid. `pidentify-status` does not call those conflicts.
 
-`pidentify-status` prints the units, the saved cameras, a live probe, conflicts, LAN addresses, Tailscale IPv4 and MagicDNS when `tailscale` is on the PATH, and an ffprobe of each local path when ffprobe is installed. The probe is a viewer, so in local mode it opens the camera.
+Desktop images run WirePlumber, and its libcamera and v4l2 monitors open the camera devices. When that is the conflict, install writes a snippet and restarts WirePlumber for each logged-in user (`systemctl --user -M <user>@`, or `runuser` with `XDG_RUNTIME_DIR`). It does not stop or disable PipeWire, so audio and screencast keep working. WirePlumber 0.5 (Trixie) gets `/etc/wireplumber/wireplumber.conf.d/50-pidentify-no-camera.conf` (`monitor.libcamera` and `monitor.v4l2` disabled). WirePlumber 0.4 (Bookworm) gets `/etc/wireplumber/main.lua.d/51-pidentify-no-camera.lua` (`libcamera_monitor.enabled = false` and `v4l2_monitor.enabled = false`). The action is appended to `takeover.log`.
 
-`sudo pidentify-uninstall` removes the units, the Avahi service file, the binaries, `/opt/pidentify`, and `/etc/pidentify`. It restores `avahi-daemon.conf` from the one-time backup, or deletes that file if this installer created it. Apt packages are removed only if this install added them and they are `ffmpeg`, `avahi-daemon`, `rpicam-apps`, or `libcamera-apps`.
+`--take-over` stops other conflicting processes. It does not uninstall or disable them, and it does not stop PipeWire. Each action is appended to `/var/lib/pidentify/takeover.log` with a reverse command (`systemctl start UNIT`, or restart a bare process by hand). It will not stop ssh, systemd, `user@` (that would kill the Pi Connect shell), Avahi, NetworkManager, or the installer's own parent processes. Its own units are not treated as conflicts. If anything is still holding a camera or port afterward, the new units stay stopped.
+
+`pidentify-status` prints the units, the saved cameras, a live probe, conflicts, LAN addresses, Tailscale IPv4 and MagicDNS when `tailscale` is on the PATH, and an ffprobe of each local path when ffprobe is installed. The probe is a viewer, so in local mode it opens the camera. Exit 0 requires both units active and no conflicts; our own listeners are not conflicts.
+
+`sudo pidentify-uninstall` removes the units, the Avahi service file, the binaries, `/opt/pidentify`, `/etc/pidentify`, and the WirePlumber snippet. After removing that snippet it restarts per-user WirePlumber so the desktop can open cameras again. It restores `avahi-daemon.conf` from the one-time backup, or deletes that file if this installer created it. Apt packages are removed only if this install added them and they are `ffmpeg`, `avahi-daemon`, `rpicam-apps`, or `libcamera-apps`.
 
 If a successful probe finds zero cameras, the summary suggests checking `/boot/firmware/config.txt` and does not write it. A failed probe (camera busy, or no `rpicam-hello`) keeps the previous `cameras.json` and does not print that suggestion.
 

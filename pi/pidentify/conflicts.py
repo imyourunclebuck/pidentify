@@ -140,6 +140,54 @@ def _hex_port(local: str) -> int | None:
         return None
 
 
+def parse_proc_net_owners(text: str, protocol: str) -> dict[int, set[int]]:
+    """Map a listening port to the socket uids in ``/proc/net/tcp`` (or udp).
+
+    The uid column is world-readable even when ``ss -p`` cannot name another
+    user's process. Column layout: local, remote, state, then queues, timer,
+    retransmit, uid.
+    """
+    owners: dict[int, set[int]] = {}
+    for raw in text.splitlines():
+        if "local_address" in raw:
+            continue
+        cols = raw.split()
+        if len(cols) < 8:
+            continue
+        state = cols[3]
+        if protocol == "tcp" and state.upper() != "0A":
+            continue
+        port = _hex_port(cols[1])
+        if port is None:
+            continue
+        try:
+            uid = int(cols[7])
+        except ValueError:
+            continue
+        owners.setdefault(port, set()).add(uid)
+    return owners
+
+
+def pidentify_uid() -> int | None:
+    import pwd
+
+    try:
+        return pwd.getpwnam("pidentify").pw_uid
+    except KeyError:
+        return None
+
+
+def read_uid(proc_root: str, pid: int) -> int | None:
+    text = _read_text(os.path.join(proc_root, str(pid), "status"))
+    for line in text.splitlines():
+        if not line.startswith("Uid:"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            return int(parts[1])
+    return None
+
+
 def unit_from_cgroup(text: str) -> str | None:
     matches = _UNIT_RE.findall(text or "")
     if not matches:
@@ -148,11 +196,39 @@ def unit_from_cgroup(text: str) -> str | None:
     return matches[-1]
 
 
-def is_own(cmdline: str, unit: str | None) -> bool:
+def is_own(
+    cmdline: str,
+    unit: str | None,
+    *,
+    uid: int | None = None,
+    service_uid: int | None = None,
+) -> bool:
+    """True for our units, our command lines, or the pidentify system user.
+
+    ``ss -p`` hides other users' pids, so a listener on 8554/8555/9997 often
+    arrives with pid null. ``/proc/net/tcp`` still has the socket uid. The
+    dedicated ``pidentify`` user is enough to call that socket ours.
+    """
     if unit in OWN_UNITS:
         return True
     text = cmdline or ""
-    return any(marker in text for marker in OWN_CMDLINE_MARKERS)
+    if any(marker in text for marker in OWN_CMDLINE_MARKERS):
+        return True
+    if service_uid is not None and uid is not None and int(uid) == int(service_uid):
+        return True
+    return False
+
+
+def is_pipewire_holder(item: dict) -> bool:
+    """True when WirePlumber or PipeWire is holding a camera device.
+
+    Those processes are not stopped. The installer disables their camera
+    monitors and leaves audio and screencast running.
+    """
+    if item.get("kind") != "device":
+        return False
+    text = " ".join(str(item.get(key) or "") for key in ("process", "cmdline", "unit")).lower()
+    return "wireplumber" in text or "pipewire" in text
 
 
 def is_protected_service(unit: str | None) -> bool:
@@ -278,7 +354,7 @@ def _read_text(path: str) -> str:
 
 def _enrich(proc_root: str, pid: int | None, process: str) -> dict:
     if not pid:
-        return {"cmdline": "", "process": process, "unit": None, "argv": []}
+        return {"cmdline": "", "process": process, "unit": None, "argv": [], "uid": None}
     argv = read_cmdline(proc_root, pid)
     cgroup = _read_text(os.path.join(proc_root, str(pid), "cgroup"))
     return {
@@ -286,6 +362,7 @@ def _enrich(proc_root: str, pid: int | None, process: str) -> dict:
         "cmdline": " ".join(argv)[:500],
         "process": os.path.basename(argv[0]) if argv else process,
         "unit": unit_from_cgroup(cgroup),
+        "uid": read_uid(proc_root, pid),
     }
 
 
@@ -298,12 +375,18 @@ def collect_conflicts(
     holders: list[dict] | None = None,
     proc_root: str = "/proc",
     ports: tuple[int, ...] = SERVICE_PORTS,
+    service_uid: int | None = None,
 ) -> dict:
     listeners = parse_ss_listeners(tcp_ss, "tcp") + parse_ss_listeners(udp_ss, "udp")
     if not tcp_ss and tcp_proc:
         listeners += parse_proc_net_listeners(tcp_proc, "tcp")
     if not udp_ss and udp_proc:
         listeners += parse_proc_net_listeners(udp_proc, "udp")
+    port_owners: dict[tuple[str, int], set[int]] = {}
+    for port, uids in parse_proc_net_owners(tcp_proc, "tcp").items():
+        port_owners.setdefault(("tcp", port), set()).update(uids)
+    for port, uids in parse_proc_net_owners(udp_proc, "udp").items():
+        port_owners.setdefault(("udp", port), set()).update(uids)
     conflicts: list[dict] = []
     own: list[dict] = []
     seen_ports: set[tuple] = set()
@@ -315,29 +398,39 @@ def collect_conflicts(
             continue
         seen_ports.add(key)
         info = _enrich(proc_root, listener.get("pid"), listener.get("process") or "")
+        uid = info.get("uid")
+        if uid is None:
+            uids = port_owners.get((listener["protocol"], listener["port"]), set())
+            if len(uids) == 1:
+                uid = next(iter(uids))
         item = {
             "kind": "port",
             "protocol": listener["protocol"],
             "port": listener["port"],
             "pid": listener.get("pid"),
+            "uid": uid,
             "process": info["process"],
             "cmdline": info["cmdline"],
             "unit": info["unit"],
         }
-        if is_own(info["cmdline"], info["unit"]):
+        if is_own(info["cmdline"], info["unit"], uid=uid, service_uid=service_uid):
             own.append(item)
         else:
             conflicts.append(item)
     for holder in holders or []:
+        uid = holder.get("uid")
+        if uid is None and holder.get("pid"):
+            uid = read_uid(proc_root, int(holder["pid"]))
         item = {
             "kind": "device",
             "devices": holder.get("devices") or [],
             "pid": holder.get("pid"),
+            "uid": uid,
             "process": holder.get("process") or "",
             "cmdline": holder.get("cmdline") or "",
             "unit": holder.get("unit"),
         }
-        if is_own(item["cmdline"], item["unit"]):
+        if is_own(item["cmdline"], item["unit"], uid=uid, service_uid=service_uid):
             own.append(item)
         else:
             conflicts.append(item)
@@ -357,10 +450,11 @@ def live_report(ports: tuple[int, ...] = SERVICE_PORTS, proc_root: str = "/proc"
     except (OSError, subprocess.TimeoutExpired):
         tcp_ss = ""
         udp_ss = ""
-    if not tcp_ss:
-        tcp_proc = _read_text("/proc/net/tcp") + "\n" + _read_text("/proc/net/tcp6")
-    if not udp_ss:
-        udp_proc = _read_text("/proc/net/udp") + "\n" + _read_text("/proc/net/udp6")
+    # Always read socket uids. ss -p omits them when the caller cannot see
+    # another user's processes, which is how pidentify-status used to call
+    # its own listeners conflicts.
+    tcp_proc = _read_text("/proc/net/tcp") + "\n" + _read_text("/proc/net/tcp6")
+    udp_proc = _read_text("/proc/net/udp") + "\n" + _read_text("/proc/net/udp6")
     return collect_conflicts(
         tcp_ss=tcp_ss,
         udp_ss=udp_ss,
@@ -369,6 +463,7 @@ def live_report(ports: tuple[int, ...] = SERVICE_PORTS, proc_root: str = "/proc"
         holders=scan_device_holders(proc_root),
         proc_root=proc_root,
         ports=ports,
+        service_uid=pidentify_uid(),
     )
 
 
@@ -396,6 +491,16 @@ def apply_takeover(
     for item in report.get("conflicts") or []:
         unit = item.get("unit")
         pid = item.get("pid")
+        if is_pipewire_holder(item):
+            actions.append(
+                _action(
+                    "refused",
+                    item,
+                    reason="leaving PipeWire running; camera monitors are disabled instead of stopping it",
+                    reverse="PipeWire was not stopped",
+                )
+            )
+            continue
         if unit and unit.endswith(".service") and not is_session_unit(unit):
             if is_protected_service(unit):
                 actions.append(_action("refused", item, reason=f"refusing to stop protected unit {unit}"))
@@ -513,7 +618,7 @@ def format_report(report: dict) -> str:
             if item.get("kind") == "port":
                 lines.append(
                     f"  port {item.get('protocol')}/{item.get('port')} "
-                    f"pid={item.get('pid')} unit={item.get('unit') or '-'} "
+                    f"pid={item.get('pid')} uid={item.get('uid')} unit={item.get('unit') or '-'} "
                     f"cmd={item.get('cmdline') or item.get('process') or '-'}"
                 )
             else:

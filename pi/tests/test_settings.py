@@ -19,6 +19,7 @@ from pidentify.settings import (  # noqa: E402
     merge_patch,
     public_settings,
     save_settings,
+    select_encoder,
 )
 
 
@@ -119,6 +120,59 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("-rtsp_transport") + 1], "tcp")
         self.assertTrue(argv[-1].endswith("/cam0"))
         self.assertIn("127.0.0.1:8554", argv[-1])
+        self.assertEqual(argv[argv.index("-probesize") + 1], "5000000")
+        self.assertNotEqual(argv[argv.index("-analyzeduration") + 1], "0")
+        self.assertEqual(argv[argv.index("-framerate") + 1], "30")
+
+    def test_pi5_uses_libav_mpegts_and_pi4_keeps_hardware_h264(self):
+        self.assertEqual(select_encoder("Raspberry Pi 5 Model B Rev 1.0"), "libav")
+        self.assertEqual(select_encoder("Raspberry Pi Compute Module 5"), "libav")
+        self.assertEqual(select_encoder("brcm,bcm2712"), "libav")
+        self.assertEqual(select_encoder("Raspberry Pi 4 Model B Rev 1.5"), "hardware")
+        self.assertEqual(select_encoder("Raspberry Pi Compute Module 4"), "hardware")
+        self.assertEqual(select_encoder("Raspberry Pi Zero 2 W"), "hardware")
+        cfg = default_settings()
+        rpicam = build_rpicam_argv(0, cfg, binary="rpicam-vid", encoder="libav", low_latency=True)
+        ffmpeg = build_ffmpeg_argv("cam0", cfg, rtsp_port=8554, binary="ffmpeg", container="mpegts")
+        self.assertEqual(
+            rpicam,
+            [
+                "rpicam-vid",
+                "-t",
+                "0",
+                "-n",
+                "--camera",
+                "0",
+                "--codec",
+                "libav",
+                "--libav-video-codec",
+                "libx264",
+                "--libav-format",
+                "mpegts",
+                "--width",
+                "1280",
+                "--height",
+                "720",
+                "--framerate",
+                "30",
+                "--bitrate",
+                "2000000",
+                "--intra",
+                "30",
+                "--flush",
+                "--low-latency",
+                "-o",
+                "-",
+            ],
+        )
+        self.assertNotIn("--inline", rpicam)
+        self.assertEqual(ffmpeg[ffmpeg.index("-f") + 1], "mpegts")
+        self.assertNotIn("-framerate", ffmpeg)
+        self.assertEqual(ffmpeg[-1], "rtsp://127.0.0.1:8554/cam0")
+        hardware = build_rpicam_argv(0, cfg, binary="rpicam-vid", encoder="hardware", low_latency=False)
+        self.assertEqual(hardware[hardware.index("--codec") + 1], "h264")
+        self.assertIn("--inline", hardware)
+        self.assertNotIn("--libav-format", hardware)
 
     def test_round_trip_file(self):
         with tempfile.TemporaryDirectory() as tmp:

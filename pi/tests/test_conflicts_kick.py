@@ -16,6 +16,7 @@ from pidentify.conflicts import (  # noqa: E402
     collect_conflicts,
     format_action_line,
     is_own,
+    is_pipewire_holder,
     parse_proc_net_listeners,
     parse_ss_listeners,
     unit_from_cgroup,
@@ -51,6 +52,72 @@ class ConflictParseTest(unittest.TestCase):
         self.assertTrue(is_own("/opt/pidentify/mediamtx /etc/pidentify/mediamtx.yml", "pidentify-mediamtx.service"))
         self.assertTrue(is_own("python3 -m pidentify.publish cam0", None))
         self.assertFalse(is_own("python3 /home/pi/Desktop/app_full.py", None))
+        self.assertTrue(is_own("", None, uid=991, service_uid=991))
+        self.assertFalse(is_own("", None, uid=1000, service_uid=991))
+
+    def test_listeners_without_pid_owned_by_pidentify_are_not_conflicts(self):
+        # ss -p omits other users. 8554=0x216A, 8555=0x216B, 9997=0x270D.
+        tcp_proc = textwrap.dedent(
+            """
+            sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+             0: 00000000:216A 00000000:0000 0A 00000000:00000000 00:00000000 00000000 991 0 1 1 0 100 0 0 10 0
+             1: 00000000:216B 00000000:0000 0A 00000000:00000000 00:00000000 00000000 991 0 2 1 0 100 0 0 10 0
+             2: 00000000:270D 00000000:0000 0A 00000000:00000000 00:00000000 00000000 991 0 3 1 0 100 0 0 10 0
+             3: 0100007F:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 4 1 0 100 0 0 10 0
+            """
+        )
+        ss = textwrap.dedent(
+            """
+            LISTEN 0 128 0.0.0.0:8554 0.0.0.0:*
+            LISTEN 0 128 0.0.0.0:8555 0.0.0.0:*
+            LISTEN 0 128 0.0.0.0:9997 0.0.0.0:*
+            LISTEN 0 128 0.0.0.0:22 0.0.0.0:*
+            """
+        )
+        report = collect_conflicts(
+            tcp_ss=ss,
+            tcp_proc=tcp_proc,
+            proc_root="/nonexistent",
+            ports=(8554, 8555, 9997),
+            service_uid=991,
+        )
+        self.assertEqual(report["conflicts"], [])
+        self.assertEqual(sorted(item["port"] for item in report["own"]), [8554, 8555, 9997])
+        self.assertTrue(all(item["pid"] is None for item in report["own"]))
+        foreign = collect_conflicts(
+            tcp_ss="LISTEN 0 128 0.0.0.0:8554 0.0.0.0:*\n",
+            tcp_proc=" 0: 00000000:216A 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 1 1 0 100 0 0 10 0\n",
+            proc_root="/nonexistent",
+            ports=(8554,),
+            service_uid=991,
+        )
+        self.assertEqual(len(foreign["conflicts"]), 1)
+        self.assertEqual(foreign["own"], [])
+
+    def test_takeover_does_not_stop_pipewire(self):
+        item = {
+            "kind": "device",
+            "devices": ["/dev/video0"],
+            "pid": 77,
+            "process": "wireplumber",
+            "cmdline": "/usr/bin/wireplumber",
+            "unit": "wireplumber.service",
+        }
+        self.assertTrue(is_pipewire_holder(item))
+        stopped = []
+        signaled = []
+        actions = apply_takeover(
+            {"conflicts": [item]},
+            proc_root="/nonexistent",
+            run_systemctl=lambda argv: stopped.append(argv),
+            signaler=lambda pid, sig: signaled.append((pid, sig)),
+            sleeper=lambda _seconds: None,
+            alive=lambda _pid: False,
+            ancestors={1},
+        )
+        self.assertEqual(stopped, [])
+        self.assertEqual(signaled, [])
+        self.assertIn("PipeWire", actions[0]["reason"])
         self.assertEqual(
             unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/app.scope"),
             "app.scope",

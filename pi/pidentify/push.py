@@ -1,7 +1,8 @@
 """Copy one local MediaMTX path to the Jetson RTSP server.
 
 MediaMTX starts this from runOnReady while push mode is on. It does not open
-the CSI camera. pidentify-publish already feeds the local path; ffmpeg copies
+the CSI camera. pidentify-publish (the same Pi 5 libav / Pi 4 hardware
+pipeline used for runOnDemand) already feeds the local path; ffmpeg copies
 that RTSP/TCP stream to push_url-camN. The process retries with backoff when
 the Jetson restarts or the network drops. SIGTERM (MediaMTX stopping the hook
 because the local path went down) exits without another retry.

@@ -61,6 +61,8 @@ class CamctlApp:
         route = path.split("?", 1)[0].rstrip("/") or "/"
         parts = [part for part in route.split("/") if part]
         try:
+            if method == "GET" and not parts:
+                return 200, self._index()
             if method == "GET" and parts == ["health"]:
                 return 200, {"ok": True, "service": "pidentify-camctl", "version": __version__}
             if method == "GET" and parts == ["cameras"]:
@@ -82,6 +84,22 @@ class CamctlApp:
         except SettingsError as exc:
             return 400, {"error": str(exc), "fields": exc.fields}
         return 404, {"error": "not found", "path": route}
+
+    def _index(self) -> dict:
+        return {
+            "service": "pidentify-camctl",
+            "version": __version__,
+            "endpoints": [
+                {"method": "GET", "path": "/"},
+                {"method": "GET", "path": "/health"},
+                {"method": "GET", "path": "/cameras"},
+                {"method": "GET", "path": "/cameras/{id}"},
+                {"method": "GET", "path": "/cameras/{id}/settings"},
+                {"method": "PUT", "path": "/cameras/{id}/settings"},
+                {"method": "POST", "path": "/cameras/{id}/settings"},
+                {"method": "POST", "path": "/cameras/{id}/restart"},
+            ],
+        }
 
     def _known(self, cam_id: str) -> str:
         if cam_id not in CAMERA_IDS:

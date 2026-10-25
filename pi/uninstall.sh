@@ -109,6 +109,43 @@ do_priv rm -f \
   "$(dest /usr/local/bin/pidentify-camctl)" \
   "$(dest /usr/local/bin/pidentify-status)" \
   "$(dest /usr/local/bin/pidentify-uninstall)"
+remove_wireplumber() {
+  local removed=0 path dir uid user runtime
+  for path in \
+    "$(dest /etc/wireplumber/wireplumber.conf.d/50-pidentify-no-camera.conf)" \
+    "$(dest /etc/wireplumber/main.lua.d/51-pidentify-no-camera.lua)"
+  do
+    if [[ -f "${path}" ]]; then
+      say "removing ${path}"
+      do_priv rm -f "${path}"
+      removed=1
+    fi
+  done
+  if [[ "${removed}" -eq 0 || "${PIDENTIFY_SKIP_SYSTEM:-}" == "1" ]]; then
+    return 0
+  fi
+  say "Restarting per-user WirePlumber so desktop cameras work again. PipeWire stays enabled."
+  shopt -s nullglob
+  for dir in /run/user/*; do
+    [[ -d "${dir}" ]] || continue
+    uid="$(basename "${dir}")"
+    [[ "${uid}" =~ ^[0-9]+$ ]] || continue
+    user="$(id -nu "${uid}" 2>/dev/null || true)"
+    [[ -n "${user}" && "${user}" != "pidentify" ]] || continue
+    runtime="${dir}"
+    if ! systemctl --user -M "${user}@" restart wireplumber pipewire pipewire-pulse; then
+      runuser -u "${user}" -- env \
+        "XDG_RUNTIME_DIR=${runtime}" \
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=${runtime}/bus" \
+        systemctl --user restart wireplumber pipewire pipewire-pulse \
+        || say "warning: could not restart WirePlumber for ${user}"
+    fi
+  done
+  shopt -u nullglob
+}
+
+remove_wireplumber
+
 do_priv rm -rf "$(dest /opt/pidentify)" "$(dest /etc/pidentify)"
 
 if [[ "${PIDENTIFY_SKIP_SYSTEM:-}" != "1" && -n "${packages}" ]]; then

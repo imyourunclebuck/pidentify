@@ -542,6 +542,34 @@ do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts --json --output "
 say "Conflict report:"
 do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts >&2 || true
 conflict_count="$(py -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("conflicts") or []))' "${conflict_file}")"
+wp_count="$(py -c 'import json,sys; from pidentify.wireplumber import pipewire_conflict_count; print(pipewire_conflict_count(json.load(open(sys.argv[1]))))' "${conflict_file}")"
+if [[ "${wp_count}" -gt 0 ]]; then
+  say "WirePlumber or PipeWire is holding a camera (${wp_count})."
+  say "Disabling the WirePlumber libcamera and v4l2 monitors. Audio and screencast stay enabled."
+  say "PipeWire itself is not stopped or disabled."
+  wp_cmd=(
+    env
+    PYTHONPATH="${SRC}"
+    "PIDENTIFY_WIREPLUMBER_VERSION=${PIDENTIFY_WIREPLUMBER_VERSION:-}"
+    python3 -m pidentify.wireplumber release
+    --conflicts "${conflict_file}"
+    --log "$(dest /var/lib/pidentify/takeover.log)"
+  )
+  if [[ -n "${PIDENTIFY_ROOT:-}" ]]; then
+    wp_cmd+=(--prefix "${PIDENTIFY_ROOT}")
+  fi
+  if [[ "${PIDENTIFY_SKIP_SYSTEM:-}" == "1" ]]; then
+    wp_cmd+=(--no-restart)
+  fi
+  do_priv "${wp_cmd[@]}"
+  if [[ "${PIDENTIFY_SKIP_SYSTEM:-}" != "1" ]]; then
+    sleep 2
+  fi
+  do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts --json --output "${conflict_file}"
+  say "Conflict report after the WirePlumber camera monitors were disabled:"
+  do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts >&2 || true
+  conflict_count="$(py -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("conflicts") or []))' "${conflict_file}")"
+fi
 if [[ "${TAKE_OVER}" -eq 1 && "${conflict_count}" -gt 0 ]]; then
   say "Stopping conflicting processes (--take-over). This does not uninstall them."
   do_priv env PYTHONPATH="${SRC}" python3 -m pidentify.conflicts \

@@ -66,6 +66,9 @@ _FORBIDDEN_EXTRA = {
     "--autofocus-mode",
     "--lens-position",
     "--hdr",
+    "--libav-format",
+    "--libav-video-codec",
+    "--libav-video-codec-opts",
 }
 
 _FLAG_RE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -339,14 +342,80 @@ def _fmt(number: float | int) -> str:
     return str(number)
 
 
+# ffmpeg's default probe is 5 MB / 5 s. The previous 32-byte probe returned
+# "unspecified size" before it had seen an SPS. One second of 720p30 at
+# 2 Mbps fits in 5 MB, and runOnDemandStartTimeout is 20 s.
+FFMPEG_PROBE_SIZE = "5000000"
+FFMPEG_ANALYZE_DURATION = "2000000"
+
+
+def read_board_text(model_path: str = "/proc/device-tree/model", compatible_path: str = "/proc/device-tree/compatible") -> str:
+    """Board strings used to decide between the hardware encoder and libav."""
+    override = os.environ.get("PIDENTIFY_PI_MODEL", "").strip()
+    if override:
+        return override
+    parts: list[str] = []
+    for path in (model_path, compatible_path):
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        text = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def select_encoder(board_text: str) -> str:
+    """Return ``libav`` on Pi 5 (no H.264 block) and ``hardware`` on Pi 4 and earlier.
+
+    ``PIDENTIFY_ENCODER=libav|hardware`` overrides detection. An unrecognised
+    board uses libav: that path works on Pi 5, and it still produces H.264 on
+    a Pi 4. Hardware mode is only selected when the board text says the SoC
+    has the old H.264 encoder.
+    """
+    override = os.environ.get("PIDENTIFY_ENCODER", "").strip().lower()
+    if override in {"libav", "hardware"}:
+        return override
+    text = (board_text or "").lower()
+    if any(marker in text for marker in ("raspberry pi 5", "compute module 5", "bcm2712")):
+        return "libav"
+    if any(
+        marker in text
+        for marker in (
+            "raspberry pi 4",
+            "raspberry pi 400",
+            "compute module 4",
+            "raspberry pi 3",
+            "raspberry pi zero 2",
+            "bcm2711",
+            "bcm2837",
+            "bcm2836",
+            "bcm2835",
+        )
+    ):
+        return "hardware"
+    return "libav"
+
+
 def build_rpicam_argv(
     camera_index: int,
     settings: dict[str, Any],
     *,
     binary: str = "rpicam-vid",
     low_latency: bool = False,
+    encoder: str = "hardware",
 ) -> list[str]:
-    """Hardware H.264 elementary stream on stdout. No shell involved."""
+    """H.264 on stdout. No shell involved.
+
+    ``hardware`` is ``--codec h264`` (Pi 4 and earlier) and an elementary
+    stream. ``libav`` is software x264 in MPEG-TS (Pi 5). On Pi 5, plain
+    ``--codec h264`` still enters the libav encoder with no container, and
+    ``-o -`` then fails with "try setting with --libav-format".
+    """
+    if encoder not in {"hardware", "libav"}:
+        raise SettingsError(f"unsupported encoder {encoder!r}")
     cfg = normalize_settings(settings, base=settings)
     argv = [
         binary,
@@ -355,8 +424,19 @@ def build_rpicam_argv(
         "-n",
         "--camera",
         str(camera_index),
-        "--codec",
-        "h264",
+    ]
+    if encoder == "libav":
+        argv += [
+            "--codec",
+            "libav",
+            "--libav-video-codec",
+            "libx264",
+            "--libav-format",
+            "mpegts",
+        ]
+    else:
+        argv += ["--codec", "h264"]
+    argv += [
         "--width",
         str(cfg["width"]),
         "--height",
@@ -367,9 +447,11 @@ def build_rpicam_argv(
         str(cfg["bitrate"]),
         "--intra",
         str(cfg["fps"]),
-        "--inline",
-        "--flush",
     ]
+    if encoder == "hardware":
+        # Repeat SPS/PPS for a raw elementary stream. MPEG-TS carries its own.
+        argv.append("--inline")
+    argv.append("--flush")
     if low_latency:
         argv.append("--low-latency")
     if cfg["brightness"] is not None:
@@ -405,14 +487,28 @@ def build_rpicam_argv(
     return argv
 
 
-def build_ffmpeg_argv(cam_id: str, settings: dict[str, Any], *, rtsp_port: int = 8554, binary: str = "ffmpeg") -> list[str]:
-    """Copy the elementary stream into RTSP/TCP without re-encoding."""
+def build_ffmpeg_argv(
+    cam_id: str,
+    settings: dict[str, Any],
+    *,
+    rtsp_port: int = 8554,
+    binary: str = "ffmpeg",
+    container: str = "h264",
+) -> list[str]:
+    """Copy rpicam-vid's stdout into RTSP/TCP without re-encoding.
+
+    ``container`` is ``mpegts`` for the Pi 5 libav path and ``h264`` for the
+    hardware elementary stream. The elementary stream has no timestamps, so
+    that path keeps wallclock timestamps and an explicit ``-framerate``.
+    """
     cfg = normalize_settings(settings, base=settings)
     if not re.fullmatch(r"cam[01]", cam_id):
         raise SettingsError(f"refusing to publish unexpected path {cam_id!r}")
     if not 1 <= int(rtsp_port) <= 65535:
         raise SettingsError(f"bad RTSP port {rtsp_port!r}")
-    return [
+    if container not in {"h264", "mpegts"}:
+        raise SettingsError(f"unsupported container {container!r}")
+    argv = [
         binary,
         "-hide_banner",
         "-loglevel",
@@ -423,15 +519,22 @@ def build_ffmpeg_argv(cam_id: str, settings: dict[str, Any], *, rtsp_port: int =
         "-flags",
         "low_delay",
         "-probesize",
-        "32",
+        FFMPEG_PROBE_SIZE,
         "-analyzeduration",
-        "0",
-        "-use_wallclock_as_timestamps",
-        "1",
-        "-f",
-        "h264",
-        "-framerate",
-        str(cfg["fps"]),
+        FFMPEG_ANALYZE_DURATION,
+    ]
+    if container == "h264":
+        argv += [
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-f",
+            "h264",
+            "-framerate",
+            str(cfg["fps"]),
+        ]
+    else:
+        argv += ["-f", "mpegts"]
+    argv += [
         "-i",
         "pipe:0",
         "-an",
@@ -447,6 +550,7 @@ def build_ffmpeg_argv(cam_id: str, settings: dict[str, Any], *, rtsp_port: int =
         "rtsp",
         f"rtsp://127.0.0.1:{int(rtsp_port)}/{cam_id}",
     ]
+    return argv
 
 
 def build_push_ffmpeg_argv(
@@ -483,6 +587,10 @@ def build_push_ffmpeg_argv(
         "nobuffer",
         "-flags",
         "low_delay",
+        "-probesize",
+        FFMPEG_PROBE_SIZE,
+        "-analyzeduration",
+        FFMPEG_ANALYZE_DURATION,
         "-i",
         local,
         "-an",

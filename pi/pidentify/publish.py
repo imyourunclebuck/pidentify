@@ -1,18 +1,17 @@
 """On-demand publisher started by MediaMTX for one CSI camera.
 
-MediaMTX runs this when a client opens the path and sends SIGINT to the
-process group when the last reader has been gone for runOnDemandCloseAfter.
-The command publishes H.264 back to MediaMTX over RTSP/TCP.
+MediaMTX runs this when a client opens the path (local mode) and also from
+runOnInit while push mode is on. It sends SIGINT to the process group when
+the last reader has been gone for runOnDemandCloseAfter. The command
+publishes H.264 back to MediaMTX over RTSP/TCP.
 
-Why ffmpeg, not rpicam-vid's own network output: Bookworm's rpicam-vid
-``--codec h264`` is the hardware encoder and its universally available sink
-is an elementary stream on stdout (``-o -``). ``--codec libav`` can mux
-MPEG-TS, but that switches encoder selection and needs a spare UDP port per
-camera. Piping the elementary stream to ``ffmpeg -c copy -f rtsp`` matches
-MediaMTX's documented runOnDemand pattern, does not re-encode, and keeps
-both cameras on the single RTSP port. ``--low-latency`` is added only when
-this rpicam-vid's --help lists it; the Bookworm 1.5 packages have ``--flush``
-but not ``--low-latency``.
+Pi 4 and earlier have a hardware H.264 encoder: ``--codec h264 --inline
+--flush -o -`` is an elementary stream, and ffmpeg reads ``-f h264``. Pi 5
+has no H.264 block. There ``--codec h264`` still enters libav, and ``-o -``
+fails unless ``--libav-format`` is set, so Pi 5 uses ``--codec libav
+--libav-video-codec libx264 --libav-format mpegts``. ffmpeg copies either
+stdout into ``rtsp://127.0.0.1:8554/<path>`` and does not re-encode.
+``--low-latency`` is added only when this rpicam-vid's --help lists it.
 """
 
 from __future__ import annotations
@@ -31,6 +30,8 @@ from pidentify.settings import (
     build_rpicam_argv,
     camera_index,
     load_settings,
+    read_board_text,
+    select_encoder,
 )
 
 CONFIG_DIR = os.environ.get("PIDENTIFY_CONFIG_DIR", "/etc/pidentify")
@@ -126,9 +127,29 @@ def run(cam_id: str) -> int:
         time.sleep(2)
         return 1
     low_latency = supports_low_latency(binary)
-    rpicam_argv = build_rpicam_argv(camera_index(cam_id), cfg, binary=binary, low_latency=low_latency)
-    ffmpeg_argv = build_ffmpeg_argv(cam_id, cfg, rtsp_port=rtsp_port(), binary=ffmpeg)
+    board = read_board_text()
+    encoder = select_encoder(board)
+    container = "mpegts" if encoder == "libav" else "h264"
+    rpicam_argv = build_rpicam_argv(
+        camera_index(cam_id),
+        cfg,
+        binary=binary,
+        low_latency=low_latency,
+        encoder=encoder,
+    )
+    ffmpeg_argv = build_ffmpeg_argv(
+        cam_id,
+        cfg,
+        rtsp_port=rtsp_port(),
+        binary=ffmpeg,
+        container=container,
+    )
+    print(
+        f"[pidentify-publish] encoder={encoder} board={board or 'unknown'}",
+        file=sys.stderr,
+    )
     print(f"[pidentify-publish] starting {' '.join(rpicam_argv)}", file=sys.stderr)
+    print(f"[pidentify-publish] ffmpeg {' '.join(ffmpeg_argv)}", file=sys.stderr)
     started = time.monotonic()
     rpicam = subprocess.Popen(rpicam_argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if rpicam.stdout is None:
