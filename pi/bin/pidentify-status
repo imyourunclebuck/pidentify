@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Show pidentify services, detected cameras, port/device conflicts, and a
+# short RTSP probe when ffprobe is installed. Probing opens the camera.
+set -u
+
+rc=0
+config_dir="${PIDENTIFY_CONFIG_DIR:-/etc/pidentify}"
+if [[ -d /opt/pidentify/pidentify ]]; then
+  export PYTHONPATH="/opt/pidentify${PYTHONPATH:+:$PYTHONPATH}"
+else
+  _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  export PYTHONPATH="${_here}/..${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
+echo "=== pidentify status ==="
+if [[ -x /usr/bin/python3 ]]; then
+  PY=/usr/bin/python3
+else
+  PY=python3
+fi
+"$PY" -m pidentify.hostname --json || rc=1
+echo
+
+echo "=== services ==="
+if command -v systemctl >/dev/null 2>&1; then
+  for unit in pidentify-mediamtx.service pidentify-camctl.service; do
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    echo "${unit}: active=${state:-unknown} enabled=${enabled:-unknown}"
+    systemctl show "$unit" -p MainPID -p ActiveState -p SubState -p Result --no-pager 2>/dev/null || true
+    if [[ "${state}" != "active" ]]; then
+      rc=1
+    fi
+  done
+else
+  echo "systemctl is not available"
+  rc=1
+fi
+echo
+
+echo "=== saved cameras ==="
+if [[ -f "${config_dir}/cameras.json" ]]; then
+  "$PY" -m pidentify.detect --from-config "${config_dir}/cameras.json" || rc=1
+else
+  echo "no ${config_dir}/cameras.json"
+fi
+echo
+
+echo "=== live probe ==="
+if "$PY" -m pidentify.detect; then
+  :
+else
+  echo "live camera probe failed (see warning above); saved inventory was kept"
+fi
+echo
+
+echo "=== conflicts ==="
+conflict_json="$("$PY" -m pidentify.conflicts --json || true)"
+printf '%s\n' "$conflict_json"
+if printf '%s' "$conflict_json" | "$PY" -c 'import json,sys; data=json.load(sys.stdin); raise SystemExit(0 if not data.get("conflicts") else 1)'; then
+  :
+else
+  echo "conflicts are present; pidentify will not take the camera until they are gone or install.sh --take-over is used"
+  rc=1
+fi
+echo
+
+echo "=== node ==="
+"$PY" -m pidentify.nodeconfig --config-dir "${config_dir}" || true
+echo
+
+echo "=== addresses ==="
+"$PY" -m pidentify.ifaces --summary || true
+echo
+"$PY" -m pidentify.tailscale --summary || true
+echo
+if [[ -f "${config_dir}/cameras.json" ]]; then
+  echo "Stream URLs:"
+  "$PY" - "${config_dir}" <<'PY' || true
+import json, sys
+from pidentify.ifaces import discover
+from pidentify.tailscale import query
+config_dir = sys.argv[1]
+try:
+    cameras = json.load(open(config_dir + "/cameras.json")).get("cameras") or []
+except OSError:
+    cameras = []
+ids = [cam.get("id") for cam in cameras if cam.get("id")]
+hosts = [item["address"] for item in discover().get("lan_ipv4") or []]
+ts = query()
+hosts.extend(ts.get("ipv4") or [])
+if ts.get("magic_dns"):
+    hosts.append(ts["magic_dns"])
+if not ids:
+    print("  no saved camera paths")
+elif not hosts:
+    for cam in ids:
+        print(f"  rtsp://<host>:8554/{cam}")
+else:
+    for host in hosts:
+        for cam in ids:
+            print(f"  rtsp://{host}:8554/{cam}")
+PY
+  echo
+fi
+
+echo "=== stream probe ==="
+if ! command -v ffprobe >/dev/null 2>&1; then
+  echo "ffprobe is not installed; skipped"
+elif ! command -v timeout >/dev/null 2>&1; then
+  echo "timeout(1) is not installed; skipped"
+else
+  echo "Each probe is an RTSP client and will open that camera."
+  ids="$("$PY" -c 'import json,sys; p=sys.argv[1]
+try:
+    data=json.load(open(p))
+except FileNotFoundError:
+    raise SystemExit(0)
+for cam in data.get("cameras") or []:
+    if cam.get("id"):
+        print(cam["id"])' "${config_dir}/cameras.json" || true)"
+  if [[ -z "${ids}" ]]; then
+    echo "no saved camera paths to probe"
+  fi
+  while IFS= read -r cam; do
+    if [[ -z "${cam}" ]]; then
+      continue
+    fi
+    echo "-- ${cam}"
+    if timeout 12 ffprobe -hide_banner -loglevel error \
+      -rtsp_transport tcp \
+      -select_streams v:0 \
+      -show_entries stream=codec_name,width,height,avg_frame_rate \
+      -of default=noprint_wrappers=1 \
+      "rtsp://127.0.0.1:8554/${cam}"; then
+      echo "probe ${cam}: ok"
+    else
+      echo "probe ${cam}: failed"
+    fi
+  done <<< "${ids}"
+fi
+
+if command -v journalctl >/dev/null 2>&1; then
+  echo
+  echo "=== recent logs ==="
+  journalctl -u pidentify-mediamtx -u pidentify-camctl -n 20 --no-pager || true
+fi
+
+exit "$rc"

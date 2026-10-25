@@ -1,0 +1,29 @@
+[Unit]
+Description=pidentify camera control API
+After=network-online.target pidentify-mediamtx.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pidentify
+Group=pidentify
+SupplementaryGroups=video render
+Environment=PYTHONPATH=/opt/pidentify
+Environment=PIDENTIFY_CONFIG_DIR=/etc/pidentify
+# 0.0.0.0 is every IPv4 interface, including tailscale0. Do not bind a LAN address.
+Environment=PIDENTIFY_BIND=0.0.0.0
+Environment=PIDENTIFY_PORT=8555
+Environment=PIDENTIFY_MEDIAMTX_API=http://127.0.0.1:9997
+ExecStart=/usr/local/bin/pidentify-camctl
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+UMask=0022
+WorkingDirectory=/var/lib/pidentify
+
+[Install]
+WantedBy=multi-user.target

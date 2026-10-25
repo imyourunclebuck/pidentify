@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# MediaMTX runs this when a viewer opens a camera path.
+set -euo pipefail
+export PYTHONPATH="/opt/pidentify${PYTHONPATH:+:$PYTHONPATH}"
+if [[ -x /usr/bin/python3 ]]; then
+  exec /usr/bin/python3 -m pidentify.publish "$@"
+fi
+exec python3 -m pidentify.publish "$@"
