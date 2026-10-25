@@ -15,20 +15,23 @@ import re
 import tempfile
 from typing import Any
 
-CAMERA_IDS = ("cam0", "cam1")
-
-AWB_MODES = (
-    "auto",
-    "incandescent",
-    "tungsten",
-    "fluorescent",
-    "indoor",
-    "daylight",
-    "cloudy",
-    "custom",
+from pidentify.sensors import (
+    AF_MODES,
+    AF_RANGES,
+    AF_SPEEDS,
+    AWB_MODES,
+    DENOISE_MODES,
+    EXPOSURE_MODES,
+    HDR_MODES,
+    METERING_MODES,
+    QUALITY_NAMES,
+    X264_PRESETS,
+    X264_TUNES,
+    quality_preset,
+    sensor_errors,
 )
-AF_MODES = ("default", "manual", "auto", "continuous")
-HDR_MODES = ("off", "auto", "sensor", "single-exp")
+
+CAMERA_IDS = ("cam0", "cam1")
 
 # Flags the publisher owns. extra_args must not override them.
 _FORBIDDEN_EXTRA = {
@@ -66,6 +69,14 @@ _FORBIDDEN_EXTRA = {
     "--autofocus-mode",
     "--lens-position",
     "--hdr",
+    "--denoise",
+    "--exposure",
+    "--metering",
+    "--awbgains",
+    "--autofocus-range",
+    "--autofocus-speed",
+    "--autofocus-window",
+    "--quality",
     "--libav-format",
     "--libav-video-codec",
     "--libav-video-codec-opts",
@@ -86,6 +97,15 @@ OPTIONAL_KEYS = (
     "autofocus_mode",
     "lens_position",
     "hdr",
+    "quality",
+    "keyframe_interval",
+    "denoise",
+    "exposure",
+    "metering",
+    "awbgains",
+    "af_range",
+    "af_speed",
+    "af_window",
 )
 REQUIRED_KEYS = (
     "width",
@@ -95,6 +115,8 @@ REQUIRED_KEYS = (
     "hflip",
     "vflip",
     "rotation",
+    "x264_preset",
+    "x264_tune",
 )
 SETTING_KEYS = REQUIRED_KEYS + OPTIONAL_KEYS
 
@@ -125,6 +147,17 @@ def default_settings() -> dict[str, Any]:
         "hflip": False,
         "vflip": False,
         "rotation": 0,
+        "quality": None,
+        "keyframe_interval": None,
+        "x264_preset": "ultrafast",
+        "x264_tune": "zerolatency",
+        "denoise": None,
+        "exposure": None,
+        "metering": None,
+        "awbgains": None,
+        "af_range": None,
+        "af_speed": None,
+        "af_window": None,
         "extra_args": [],
     }
 
@@ -182,8 +215,18 @@ def _optional_hdr(value: Any) -> str | None:
     return value
 
 
-def normalize_settings(data: dict[str, Any], *, base: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Validate a full settings object. Unknown keys are rejected."""
+def normalize_settings(
+    data: dict[str, Any],
+    *,
+    base: dict[str, Any] | None = None,
+    camera: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a full settings object. Unknown keys are rejected.
+
+    ``camera`` is the cameras.json record. When it is present, resolution,
+    HDR, NoIR white balance, and autofocus are checked against that sensor.
+    Loading the file without a camera record still checks types and ranges.
+    """
     if not isinstance(data, dict):
         raise SettingsError("invalid settings", {"_": "expected an object"})
     unknown = sorted(set(data) - set(SETTING_KEYS) - {"extra_args"})
@@ -218,15 +261,31 @@ def normalize_settings(data: dict[str, Any], *, base: dict[str, Any] | None = No
     out["sharpness"] = _optional_number(merged["sharpness"], "sharpness", low=0.0, high=16.0)
     out["ev"] = _optional_number(merged["ev"], "ev", low=-10.0, high=10.0)
     out["awb"] = _optional_choice(merged["awb"], "awb", AWB_MODES)
-    out["shutter"] = _optional_int(merged["shutter"], "shutter", low=1, high=10_000_000)
-    out["gain"] = _optional_number(merged["gain"], "gain", low=1.0, high=64.0)
+    out["shutter"] = _optional_int(merged["shutter"], "shutter", low=0, high=10_000_000)
+    out["gain"] = _optional_number(merged["gain"], "gain", low=0.0, high=64.0)
     out["autofocus_mode"] = _optional_choice(merged["autofocus_mode"], "autofocus_mode", AF_MODES)
     out["lens_position"] = _optional_lens(merged["lens_position"])
     out["hdr"] = None if merged["hdr"] is None else _optional_hdr(merged["hdr"])
+    out["quality"] = _optional_choice(merged["quality"], "quality", QUALITY_NAMES)
+    out["keyframe_interval"] = _optional_int(merged["keyframe_interval"], "keyframe_interval", low=1, high=300)
+    out["x264_preset"] = _required_choice(merged["x264_preset"], "x264_preset", X264_PRESETS)
+    out["x264_tune"] = _required_choice(merged["x264_tune"], "x264_tune", X264_TUNES)
+    out["denoise"] = _optional_choice(merged["denoise"], "denoise", DENOISE_MODES)
+    out["exposure"] = _optional_choice(merged["exposure"], "exposure", EXPOSURE_MODES)
+    out["metering"] = _optional_choice(merged["metering"], "metering", METERING_MODES)
+    out["awbgains"] = _optional_gains(merged["awbgains"])
+    out["af_range"] = _optional_choice(merged["af_range"], "af_range", AF_RANGES)
+    out["af_speed"] = _optional_choice(merged["af_speed"], "af_speed", AF_SPEEDS)
+    out["af_window"] = _optional_window(merged["af_window"])
+    if out["awb"] != "custom":
+        out["awbgains"] = None
     if "extra_args" in data or base is not None:
         out["extra_args"] = validate_extra_args(merged.get("extra_args") or [])
     else:
         out["extra_args"] = []
+    sensor = sensor_errors(out, camera)
+    if sensor:
+        raise SettingsError("invalid settings", sensor)
     return out
 
 
@@ -252,8 +311,42 @@ def _optional_choice(value: Any, name: str, choices: tuple[str, ...]) -> str | N
     if value is None:
         return None
     if not isinstance(value, str) or value not in choices:
-        raise SettingsError("invalid settings", {name: f"expected one of {', '.join(choices)}"})
+        raise SettingsError("invalid settings", {name: "expected one of {0}".format(", ".join(choices))})
     return value
+
+
+def _required_choice(value: Any, name: str, choices: tuple[str, ...]) -> str:
+    if not isinstance(value, str) or value not in choices:
+        raise SettingsError("invalid settings", {name: "expected one of {0}".format(", ".join(choices))})
+    return value
+
+
+def _optional_gains(value: Any) -> list[float] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise SettingsError("invalid settings", {"awbgains": "expected [red, blue]"})
+    red = float(_number(value[0], "awbgains", low=0.0, high=32.0))
+    blue = float(_number(value[1], "awbgains", low=0.0, high=32.0))
+    return [red, blue]
+
+
+def _optional_window(value: Any) -> dict[str, float] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SettingsError("invalid settings", {"af_window": "expected {x, y, w, h} in normalized 0..1 coordinates"})
+    missing = [key for key in ("x", "y", "w", "h") if key not in value]
+    if missing or set(value) - {"x", "y", "w", "h"}:
+        raise SettingsError("invalid settings", {"af_window": "expected x, y, w, and h"})
+    window = {}
+    for key in ("x", "y", "w", "h"):
+        window[key] = float(_number(value[key], "af_window", low=0.0, high=1.0))
+    if window["w"] <= 0 or window["h"] <= 0:
+        raise SettingsError("invalid settings", {"af_window": "w and h must be greater than 0"})
+    if window["x"] + window["w"] > 1.0001 or window["y"] + window["h"] > 1.0001:
+        raise SettingsError("invalid settings", {"af_window": "x+w and y+h must be at most 1"})
+    return window
 
 
 def _optional_lens(value: Any) -> float | str | None:
@@ -269,8 +362,17 @@ def _optional_lens(value: Any) -> float | str | None:
     return float(_number(value, "lens_position", low=0.0, high=32.0))
 
 
-def merge_patch(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """Apply a partial update. Null clears an optional control back to default."""
+def merge_patch(
+    current: dict[str, Any],
+    patch: dict[str, Any],
+    *,
+    camera: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply a partial update. Null clears an optional control back to default.
+
+    ``quality`` of low, medium, high, or max fills in the Pi 5 encode preset
+    for this sensor. Other keys in the same patch override those fields.
+    """
     if not isinstance(patch, dict):
         raise SettingsError("invalid settings", {"_": "expected an object"})
     if "extra_args" in patch:
@@ -281,9 +383,29 @@ def merge_patch(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any
     unknown = sorted(set(patch) - set(SETTING_KEYS))
     if unknown:
         raise SettingsError("invalid settings", {key: "unknown setting" for key in unknown})
+    applied = dict(patch)
+    if "awbgains" in applied and applied["awbgains"] is not None:
+        awb = applied["awb"] if "awb" in applied else current.get("awb")
+        if awb != "custom":
+            raise SettingsError(
+                "invalid settings",
+                {"awbgains": "set awb to custom before awbgains"},
+            )
+    quality = applied.get("quality")
+    if quality:
+        model = str((camera or {}).get("model") or "")
+        preset = quality_preset(str(quality), model)
+        if preset is None:
+            raise SettingsError(
+                "invalid settings",
+                {"quality": "expected one of {0}".format(", ".join(QUALITY_NAMES))},
+            )
+        expanded = dict(preset)
+        expanded.update(applied)
+        applied = expanded
     merged = dict(current)
-    merged.update(patch)
-    return normalize_settings(merged, base=current)
+    merged.update(applied)
+    return normalize_settings(merged, base=current, camera=camera)
 
 
 def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -436,6 +558,15 @@ def build_rpicam_argv(
         ]
     else:
         argv += ["--codec", "h264"]
+    if encoder == "libav":
+        argv += [
+            "--libav-video-codec-opts",
+            "preset={preset}:tune={tune}".format(
+                preset=cfg["x264_preset"],
+                tune=cfg["x264_tune"],
+            ),
+        ]
+    gop = cfg["keyframe_interval"] if cfg["keyframe_interval"] is not None else cfg["fps"]
     argv += [
         "--width",
         str(cfg["width"]),
@@ -446,7 +577,7 @@ def build_rpicam_argv(
         "--bitrate",
         str(cfg["bitrate"]),
         "--intra",
-        str(cfg["fps"]),
+        str(gop),
     ]
     if encoder == "hardware":
         # Repeat SPS/PPS for a raw elementary stream. MPEG-TS carries its own.
@@ -454,6 +585,15 @@ def build_rpicam_argv(
     argv.append("--flush")
     if low_latency:
         argv.append("--low-latency")
+    argv += _image_args(cfg)
+    argv += list(cfg["extra_args"])
+    argv += ["-o", "-"]
+    return argv
+
+
+def _image_args(cfg: dict[str, Any]) -> list[str]:
+    """rpicam image, denoise, HDR, and autofocus flags shared by vid and still."""
+    argv: list[str] = []
     if cfg["brightness"] is not None:
         argv += ["--brightness", _fmt(cfg["brightness"])]
     if cfg["contrast"] is not None:
@@ -464,27 +604,203 @@ def build_rpicam_argv(
         argv += ["--sharpness", _fmt(cfg["sharpness"])]
     if cfg["ev"] is not None:
         argv += ["--ev", _fmt(cfg["ev"])]
+    if cfg["exposure"] is not None:
+        argv += ["--exposure", cfg["exposure"]]
+    if cfg["metering"] is not None:
+        argv += ["--metering", cfg["metering"]]
     if cfg["awb"] is not None:
         argv += ["--awb", cfg["awb"]]
-    if cfg["shutter"] is not None:
+    if cfg["awbgains"]:
+        argv += [
+            "--awbgains",
+            "{red},{blue}".format(red=_fmt(cfg["awbgains"][0]), blue=_fmt(cfg["awbgains"][1])),
+        ]
+    if cfg["shutter"] not in (None, 0):
         argv += ["--shutter", str(cfg["shutter"])]
-    if cfg["gain"] is not None:
+    if cfg["gain"] not in (None, 0, 0.0):
         argv += ["--gain", _fmt(cfg["gain"])]
-    if cfg["autofocus_mode"] is not None:
-        argv += ["--autofocus-mode", cfg["autofocus_mode"]]
-    if cfg["lens_position"] is not None:
-        argv += ["--lens-position", _fmt(cfg["lens_position"]) if not isinstance(cfg["lens_position"], str) else cfg["lens_position"]]
+    if cfg["denoise"] is not None:
+        argv += ["--denoise", cfg["denoise"]]
     if cfg["hdr"] not in (None, "off"):
         argv += ["--hdr", cfg["hdr"]]
+    if cfg["autofocus_mode"] is not None:
+        argv += ["--autofocus-mode", cfg["autofocus_mode"]]
+    if cfg["af_range"] is not None:
+        argv += ["--autofocus-range", cfg["af_range"]]
+    if cfg["af_speed"] is not None:
+        argv += ["--autofocus-speed", cfg["af_speed"]]
+    if cfg["af_window"] is not None:
+        window = cfg["af_window"]
+        argv += [
+            "--autofocus-window",
+            "{x},{y},{w},{h}".format(
+                x=_fmt(window["x"]),
+                y=_fmt(window["y"]),
+                w=_fmt(window["w"]),
+                h=_fmt(window["h"]),
+            ),
+        ]
+    if cfg["lens_position"] is not None:
+        shown = cfg["lens_position"] if isinstance(cfg["lens_position"], str) else _fmt(cfg["lens_position"])
+        argv += ["--lens-position", shown]
     if cfg["hflip"]:
         argv.append("--hflip")
     if cfg["vflip"]:
         argv.append("--vflip")
     if cfg["rotation"]:
         argv += ["--rotation", str(cfg["rotation"])]
-    argv += list(cfg["extra_args"])
+    return argv
+
+
+def build_snapshot_argv(
+    camera_index: int,
+    settings: dict[str, Any],
+    *,
+    width: int,
+    height: int,
+    jpeg_quality: int = 90,
+    binary: str = "rpicam-still",
+) -> list[str]:
+    """One JPEG on stdout. The caller must already have released the live publisher."""
+    cfg = normalize_settings(settings, base=settings)
+    cfg["width"] = int(width)
+    cfg["height"] = int(height)
+    # HDR on imx708 is only the 2304x1296 mode. A full-resolution still keeps
+    # the other image controls and leaves HDR off when the size cannot use it.
+    if (int(width), int(height)) != (2304, 1296):
+        cfg["hdr"] = "off"
+    if not 1 <= int(jpeg_quality) <= 100:
+        raise SettingsError("invalid settings", {"jpeg_quality": "expected 1..100"})
+    argv = [
+        binary,
+        "-n",
+        "-t",
+        "1000",
+        "--camera",
+        str(camera_index),
+        "--width",
+        str(int(width)),
+        "--height",
+        str(int(height)),
+        "--quality",
+        str(int(jpeg_quality)),
+        "--immediate",
+    ]
+    argv += _image_args(cfg)
     argv += ["-o", "-"]
     return argv
+
+
+def build_autofocus_argv(
+    camera_index: int,
+    settings: dict[str, Any],
+    *,
+    binary: str = "rpicam-still",
+) -> list[str]:
+    """One-shot AF. Metadata JSON on stdout, image discarded.
+
+    ``--autofocus-on-capture`` runs a single cycle. The caller parses
+    ``LensPosition`` from the metadata and restarts the live publisher.
+    """
+    cfg = normalize_settings(settings, base=settings)
+    argv = [
+        binary,
+        "-n",
+        "-t",
+        "4000",
+        "--camera",
+        str(camera_index),
+        "--autofocus-mode",
+        "auto",
+        "--autofocus-on-capture",
+        "--width",
+        "1280",
+        "--height",
+        "720",
+    ]
+    if cfg["af_range"] is not None:
+        argv += ["--autofocus-range", cfg["af_range"]]
+    if cfg["af_speed"] is not None:
+        argv += ["--autofocus-speed", cfg["af_speed"]]
+    if cfg["af_window"] is not None:
+        window = cfg["af_window"]
+        argv += [
+            "--autofocus-window",
+            "{x},{y},{w},{h}".format(
+                x=_fmt(window["x"]),
+                y=_fmt(window["y"]),
+                w=_fmt(window["w"]),
+                h=_fmt(window["h"]),
+            ),
+        ]
+    argv += ["--metadata", "-", "-o", "/dev/null"]
+    return argv
+
+
+def build_record_argv(
+    cam_id: str,
+    seconds: int,
+    dest: str,
+    *,
+    local_port: int = 8554,
+    binary: str = "ffmpeg",
+) -> list[str]:
+    """Copy the live RTSP path into an MP4. Does not open the camera itself."""
+    if cam_id not in CAMERA_IDS:
+        raise SettingsError("refusing to record unexpected path {0}".format(cam_id))
+    if not 1 <= int(seconds) <= 120:
+        raise SettingsError("invalid settings", {"seconds": "expected 1..120"})
+    if not dest or os.path.basename(dest) != dest and not dest.startswith("/"):
+        raise SettingsError("refusing record path")
+    return [
+        binary,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        "rtsp://127.0.0.1:{0}/{1}".format(int(local_port), cam_id),
+        "-t",
+        str(int(seconds)),
+        "-an",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        dest,
+    ]
+
+
+def build_preview_argv(
+    cam_id: str,
+    *,
+    local_port: int = 8554,
+    binary: str = "ffmpeg",
+) -> list[str]:
+    """One JPEG frame from the live RTSP path, on stdout."""
+    if cam_id not in CAMERA_IDS:
+        raise SettingsError("refusing to preview unexpected path {0}".format(cam_id))
+    return [
+        binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        "rtsp://127.0.0.1:{0}/{1}".format(int(local_port), cam_id),
+        "-frames:v",
+        "1",
+        "-f",
+        "image2",
+        "-update",
+        "1",
+        "pipe:1",
+    ]
 
 
 def build_ffmpeg_argv(

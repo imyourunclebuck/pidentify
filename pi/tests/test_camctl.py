@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import unittest
@@ -11,7 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pidentify.camctl import CamctlApp, make_server  # noqa: E402
+from pidentify.camctl import CamctlApp, RawBody, make_server  # noqa: E402
+from pidentify.capture import prune_captures  # noqa: E402
 from pidentify.settings import default_settings, save_settings  # noqa: E402
 
 
@@ -70,6 +72,7 @@ class CamctlTest(unittest.TestCase):
 
         self.app = CamctlApp(
             config_dir=str(self.config),
+            state_dir=str(self.config / "state"),
             kicker=kicker,
             path_lookup=lambda cam_id: False,
         )
@@ -159,9 +162,129 @@ class CamctlTest(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=3) as response:
                 payload = json.load(response)
             self.assertEqual(payload["settings"]["contrast"], 1.4)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ui", timeout=3) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("text/html", response.headers["Content-Type"])
+            self.assertIn("Autofocus", page)
+            self.assertIn("Reset to defaults", page)
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_settings_include_imx708_capabilities_and_reject_bad_size(self):
+        status, body = self.app.dispatch("GET", "/cameras/cam0/settings", None, "127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["capabilities"]["autofocus"]["supported"])
+        self.assertIn({"width": 2304, "height": 1296}, body["capabilities"]["hdr"]["resolutions"])
+        payload = json.dumps({"width": 1000, "height": 1000}).encode()
+        status, body = self.app.dispatch("PUT", "/cameras/cam0/settings", payload, "127.0.0.1")
+        self.assertEqual(status, 400)
+        self.assertIn("mode list", body["fields"]["width"])
+
+    def test_imx477_autofocus_is_rejected(self):
+        cameras = {
+            "cameras": [
+                {"id": "cam0", "index": 0, "model": "imx477", "modes": "4056x3040", "present": True}
+            ]
+        }
+        (self.config / "cameras.json").write_text(json.dumps(cameras), encoding="utf-8")
+        payload = json.dumps({"autofocus_mode": "continuous"}).encode()
+        status, body = self.app.dispatch("PUT", "/cameras/cam0/settings", payload, "127.0.0.1")
+        self.assertEqual(status, 400)
+        self.assertIn("not supported", body["error"] + body["fields"]["autofocus_mode"])
+        status, body = self.app.dispatch("POST", "/cameras/cam0/autofocus", b"", "100.64.1.5")
+        self.assertEqual(status, 400)
+        self.assertIn("imx477", body["error"])
+
+    def test_autofocus_snapshot_record_and_reset(self):
+        events = []
+
+        def pauser(cam_id):
+            events.append(("pause", cam_id))
+            return True
+
+        def af_runner(argv):
+            events.append(("af", argv))
+            return {"lens_position": 2.25, "af_state": "focused"}
+
+        def snapshot_runner(argv):
+            events.append(("still", argv))
+            return b"\xff\xd8\xff\xd9"
+
+        def record_runner(argv):
+            events.append(("record", argv[-1]))
+            with open(argv[-1], "wb") as handle:
+                handle.write(b"fake-mp4")
+
+        self.app.pauser = pauser
+        self.app.af_runner = af_runner
+        self.app.snapshot_runner = snapshot_runner
+        self.app.record_runner = record_runner
+        status, body = self.app.dispatch("POST", "/cameras/cam0/autofocus", b"", "127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["lens_position"], 2.25)
+        self.assertIn("interrupted_ms", body)
+        self.assertEqual(events[0][0], "pause")
+        self.assertEqual(events[1][0], "af")
+        self.assertEqual(self.kicks[-1][0], "cam0")
+        status, body = self.app.dispatch("POST", "/cameras/cam0/snapshot", b"{}", "127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(body, RawBody)
+        self.assertEqual(body.content_type, "image/jpeg")
+        self.assertIn("X-Stream-Interrupted-Ms", body.headers)
+        self.assertTrue(body.data.startswith(b"\xff\xd8"))
+        payload = json.dumps({"seconds": 3}).encode()
+        status, body = self.app.dispatch("POST", "/cameras/cam0/record", payload, "127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["file"].startswith("cam0-"))
+        self.assertIn("not opened a second time", body["note"])
+        status, listing = self.app.dispatch("GET", "/cameras/cam0/captures", None, "127.0.0.1")
+        self.assertEqual(listing["captures"][0]["name"], body["file"])
+        status, download = self.app.dispatch("GET", "/captures/" + body["file"], None, "10.1.1.1")
+        self.assertEqual(status, 200)
+        self.assertEqual(download.data, b"fake-mp4")
+        status, _missing = self.app.dispatch("GET", "/captures/..", None, "127.0.0.1")
+        self.assertEqual(status, 400)
+        payload = json.dumps({"reset": True}).encode()
+        self.app.dispatch("PUT", "/cameras/cam0/settings", json.dumps({"bitrate": 4000000}).encode(), "127.0.0.1")
+        status, body = self.app.dispatch("POST", "/cameras/cam0/settings", payload, "127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["settings"]["bitrate"], 2_000_000)
+        self.assertEqual(body["settings"]["autofocus_mode"], None)
+
+    def test_token_gates_the_api(self):
+        (self.config / "config").write_text("mode=local\nname=pi\npush_url=\ncontrol_token=s3cret\n", encoding="utf-8")
+        status, body = self.app.dispatch("GET", "/health", None, "127.0.0.1")
+        self.assertEqual(status, 401)
+        self.assertIn("authentication", body["error"])
+        headers = {"Authorization": "Bearer s3cret"}
+        status, body = self.app.dispatch("GET", "/health", None, "127.0.0.1", headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        basic = base64_token("pidentify", "s3cret")
+        status, _body = self.app.dispatch("GET", "/ui", None, "100.64.8.8", {"Authorization": basic})
+        self.assertEqual(status, 200)
+
+    def test_prune_drops_oldest_clips(self):
+        directory = self.config / "state" / "captures"
+        directory.mkdir(parents=True)
+        older = directory / "cam0-20261025T101500Z.mp4"
+        newer = directory / "cam0-20261025T101530Z.mp4"
+        older.write_bytes(b"12345")
+        newer.write_bytes(b"12345")
+        os.utime(older, (1, 1))
+        os.utime(newer, (2, 2))
+        removed = prune_captures(str(self.config / "state"), limit_bytes=6, protect=newer.name)
+        self.assertEqual(removed, [older.name])
+        self.assertTrue(newer.exists())
+        self.assertFalse(older.exists())
+
+
+def base64_token(user: str, password: str) -> str:
+    import base64
+
+    blob = base64.b64encode(("{0}:{1}".format(user, password)).encode("utf-8")).decode("ascii")
+    return "Basic " + blob
 
 
 if __name__ == "__main__":

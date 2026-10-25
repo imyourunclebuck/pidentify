@@ -15,6 +15,8 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 
+from pidentify.sensors import parse_mode_line
+
 _CAM_LINE = re.compile(
     r"^\s*(\d+)\s*:\s*(\S+)\s*\[([^\]]*)\]\s*(?:\(([^)]*)\))?",
 )
@@ -37,6 +39,7 @@ class Camera:
     model: str
     modes: str
     device: str
+    resolutions: tuple = ()
 
     @property
     def id(self) -> str:
@@ -46,34 +49,64 @@ class Camera:
         data = asdict(self)
         data["id"] = self.id
         data["present"] = True
+        data["resolutions"] = [
+            {"width": width, "height": height, "max_fps": fps}
+            for width, height, fps in self.resolutions
+        ]
         return data
 
 
 def parse_list_cameras(text: str) -> tuple[list[Camera], list[str]]:
     """Return detected cameras (indexes 0 and 1 only) and human warnings."""
     found: dict[int, Camera] = {}
+    pending: dict[int, list[tuple[int, int, float | None]]] = {}
+    current: int | None = None
     warnings: list[str] = []
     for line in text.splitlines():
         match = _CAM_LINE.match(line)
-        if not match:
-            continue
-        index = int(match.group(1))
-        camera = Camera(
-            index=index,
-            model=match.group(2),
-            modes=(match.group(3) or "").strip(),
-            device=(match.group(4) or "").strip(),
-        )
-        if index not in (0, 1):
-            warnings.append(
-                f"ignoring camera index {index} ({camera.model}); only cam0 and cam1 are published"
+        if match:
+            index = int(match.group(1))
+            current = index
+            pending.setdefault(index, [])
+            camera = Camera(
+                index=index,
+                model=match.group(2),
+                modes=(match.group(3) or "").strip(),
+                device=(match.group(4) or "").strip(),
             )
+            if index not in (0, 1):
+                warnings.append(
+                    f"ignoring camera index {index} ({camera.model}); only cam0 and cam1 are published"
+                )
+                continue
+            if index in found:
+                warnings.append(f"duplicate camera index {index}; keeping the first ({found[index].model})")
+                continue
+            found[index] = camera
             continue
-        if index in found:
-            warnings.append(f"duplicate camera index {index}; keeping the first ({found[index].model})")
+        if current is None:
             continue
-        found[index] = camera
-    cameras = [found[i] for i in sorted(found)]
+        parsed = parse_mode_line(line)
+        if parsed is None:
+            continue
+        pending.setdefault(current, []).append(parsed)
+    cameras = []
+    for index in sorted(found):
+        camera = found[index]
+        seen = []
+        for width, height, fps in pending.get(index, []):
+            if any(item[0] == width and item[1] == height for item in seen):
+                continue
+            seen.append((width, height, fps))
+        cameras.append(
+            Camera(
+                index=camera.index,
+                model=camera.model,
+                modes=camera.modes,
+                device=camera.device,
+                resolutions=tuple(seen),
+            )
+        )
     return cameras, warnings
 
 

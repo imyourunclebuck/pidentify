@@ -100,37 +100,123 @@ Switch back with `sudo bash install.sh --local`. The stored push URL is kept and
 
 ## camctl
 
-Stdlib Python on `:8555`. No authentication. Partial JSON merge, not a full replace. `null` clears an optional control. `extra_args` is rejected over HTTP (edit `/etc/pidentify/cam_settings.json` on the Pi) so the API cannot inject a shell command. PUT and POST both merge. A body may be the settings object itself, or `{"settings": {...}, "restart": false}`. A settings write returns 200 after the file is saved; `restart.ok` says whether the live path was kicked.
+Stdlib Python on `:8555`, bound on every IPv4 interface including `tailscale0`. Clients must be loopback, LAN, or Tailscale CGNAT. The control page is `http://<tailscale-name>:8555/ui`. The full surface is [Camera control API](#camera-control-api).
+
+## Camera control API
+
+Settings live in `/etc/pidentify/cam_settings.json`, one object per `cam0` or `cam1`. A write merges. `null` clears an optional control. `extra_args` is rejected over HTTP. A body may be the settings object, or `{"settings": {...}, "restart": false}`. `{"reset": true}` restores defaults and restarts that camera. The response is 200 after the file is saved; `restart.ok` says whether that camera's publisher was kicked. A bad value is 400 with `error` and `fields`.
+
+GET `/cameras/<id>/settings` returns `settings` and `capabilities`. `capabilities.resolutions` is the sensor mode list from `rpicam-hello --list-cameras` plus the scaled sizes rpicam-vid can produce from those modes (for an imx708: 640x480, 1280x720, 1536x864, 1920x1080, 2304x1296, 4608x2592; for an imx477: 640x480, 1280x720, 1332x990, 1920x1080, 2028x1080, 2028x1520, 4056x3040). Each entry has `max_fps`. A size outside that list is 400.
+
+Changing stream, image, or autofocus settings rebuilds only that camera's `rpicam-vid` command and restarts only that path (`runOnDemand` locally, `runOnInit` while pushing). The on-disk MediaMTX command stays `pidentify-publish camN`.
 
 | Method | Path | Result |
 | --- | --- | --- |
-| GET | `/` | JSON index of the endpoints below |
+| GET | `/` | JSON index of these routes |
 | GET | `/health` | `{"ok": true, ...}` |
+| GET | `/ui` | control page (preview, sliders from capabilities, Autofocus, Snapshot, Record, reset) |
 | GET | `/cameras` | detected cameras, settings, `streaming` |
 | GET | `/cameras/<id>` | one camera |
-| GET | `/cameras/<id>/settings` | settings object |
-| PUT, POST | `/cameras/<id>/settings` | merge, then kick that path |
+| GET | `/cameras/<id>/settings` | settings plus capabilities |
+| PUT, POST | `/cameras/<id>/settings` | merge, then kick that camera |
 | POST | `/cameras/<id>/restart` | kick only. 502 if MediaMTX is down and nothing is publishing |
+| POST | `/cameras/<id>/autofocus` | one-shot AF cycle. Returns `lens_position`. 400 `autofocus is not supported on imx477` for fixed-focus sensors |
+| POST | `/cameras/<id>/snapshot` | JPEG body. Optional `{"width", "height", "quality"}`. `quality` here is JPEG 1–100, default 90. Omit width and height for the largest mode |
+| GET | `/cameras/<id>/preview.jpg` | one JPEG from the live RTSP path |
+| POST | `/cameras/<id>/record` | `{"seconds": 1..120}`. Saves an MP4 copied from `rtsp://127.0.0.1:8554/<id>` |
+| GET | `/cameras/<id>/captures` and `/captures` | clip list, bytes used, and the cap |
+| GET | `/captures/<name>` | download `video/mp4` |
 
-`<id>` is `cam0` or `cam1`. The kick PATCHes MediaMTX `runOnDemand` (local) or `runOnInit` (push) with a generation token so the publisher re-reads `cam_settings.json`. The on-disk yml command stays `pidentify-publish camN`. If the API is down, the publisher process group gets SIGTERM and MediaMTX restarts it while a viewer is still connected.
+Authentication is off unless `/etc/pidentify/config` sets `control_token`. Then every route needs `Authorization: Bearer <token>` or HTTP Basic with that password (any username). The browser prompt covers `/ui` and the preview image. `install.sh` keeps an existing token. `capture_limit_mb` defaults to 512; oldest clips in `/var/lib/pidentify/captures` are deleted first. A clip that by itself exceeds the cap is kept.
 
-| Key | Range |
+### Stream
+
+| Key | Values |
 | --- | --- |
-| width, height | even, 160–8192 and 120–8192. Default 1280x720 |
-| fps | integer 1–120. Default 30 |
+| quality | `low`, `medium`, `high`, `max`, or null. Fills width, height, fps, bitrate, x264 preset/tune, and keyframe interval for a Pi 5 software encode. Other keys in the same request override the preset. `max` is the highest rate that still aims at 30 fps (1920x1080 on imx708, 2028x1520 on imx477), not the full sensor readout |
+| width, height | a pair from `capabilities.resolutions`. Default 1280x720 |
+| fps | integer 1–120, and not above that mode's `max_fps` |
 | bitrate | 100000–25000000. Default 2000000 |
+| keyframe_interval | frames 1–300, or null to use fps |
+| x264_preset | ultrafast (default), superfast, veryfast, faster, fast, medium |
+| x264_tune | zerolatency (default), film, animation, grain, fastdecode. Passed as `--libav-video-codec-opts` on Pi 5. A Pi 4 hardware encoder stores them and does not send them |
+| hdr | off, auto, sensor, single-exp. JSON `true` is auto and `false` is off. imx708 only, and only at 2304x1296. Applying it restarts the camera. Other sensors get 400 |
+| denoise | auto, off, cdn_off, cdn_fast, cdn_hq, or null |
+| hflip, vflip | booleans. Default false |
+| rotation | 0 or 180 |
+
+### Image
+
+| Key | Values |
+| --- | --- |
+| exposure | normal, short, long, or null |
+| shutter | microseconds. `0` or null is auto (the flag is omitted). Max 10000000 |
+| gain | analogue gain. `0` or null is auto. Max 64 |
+| ev | -10..10, or null |
+| metering | centre, spot, average, matrix, or null |
+| awb | auto, incandescent, tungsten, fluorescent, indoor, daylight, cloudy, custom, or null. `greyworld` is accepted only when the model name contains `noir` |
+| awbgains | `[red, blue]`, each 0..32, only when `awb` is `custom`. Switching AWB away from custom clears it |
 | brightness | -1..1, or null |
 | contrast, saturation | 0..32, or null |
 | sharpness | 0..16, or null |
-| ev | -10..10, or null |
-| awb | auto, incandescent, tungsten, fluorescent, indoor, daylight, cloudy, custom, or null |
-| shutter | microseconds 1..10000000, or null |
-| gain | 1..64, or null |
-| autofocus_mode | default, manual, auto, continuous, or null |
-| lens_position | dioptres 0..32 (0 = infinity), `"default"`, or null |
-| hdr | off, auto, sensor, single-exp. JSON `true` is auto and `false` is off |
-| hflip, vflip | booleans. Default false |
-| rotation | 0 or 180 |
+
+### Autofocus
+
+imx708, including wide and NoIR, reports `capabilities.autofocus.supported: true`. imx477 and other fixed-focus sensors report `supported: false` and a 400 if a client sets any AF field.
+
+| Key | Values |
+| --- | --- |
+| autofocus_mode | manual, auto, continuous, default, or null |
+| af_range | normal, macro, full, or null |
+| af_speed | normal, fast, or null |
+| af_window | `{x, y, w, h}` normalized 0..1, with `x+w` and `y+h` at most 1, or null |
+| lens_position | dioptres. imx708 is 0..10 (0 = infinity), or `"default"`, or null |
+
+`POST /cameras/<id>/autofocus` stops that camera's publisher, runs `rpicam-still --autofocus-mode auto --autofocus-on-capture`, and restarts the publisher. The JSON body includes `lens_position`, `af_state`, `interrupted_ms`, and a note. The position is not written back; PUT `lens_position` to hold it.
+
+### Snapshot and record
+
+A snapshot needs the CSI device, so the live publisher for that camera is stopped, `rpicam-still` writes one JPEG, and the publisher is restarted. The response is `image/jpeg` with `X-Stream-Interrupted-Ms` and `X-Stream-Note`. Expect about 1–3 seconds of missing video. The preview image does not do this: it is one frame from the live RTSP path (`X-Stream-Interrupted-Ms: 0`). If the path is idle, MediaMTX starts it the same way a viewer would.
+
+Record does not reopen the camera. ffmpeg copies the live RTSP feed to `/var/lib/pidentify/captures/camN-<utc>.mp4` for `seconds`. An idle on-demand path stays up for the length of the clip.
+
+### Example: imx708, 1080p, continuous AF
+
+```json
+{
+  "quality": "high",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "bitrate": 5000000,
+  "keyframe_interval": 30,
+  "x264_preset": "ultrafast",
+  "x264_tune": "zerolatency",
+  "hdr": "off",
+  "denoise": "cdn_fast",
+  "rotation": 0,
+  "hflip": false,
+  "vflip": false,
+  "exposure": "normal",
+  "shutter": 0,
+  "gain": 0,
+  "ev": 0,
+  "metering": "centre",
+  "awb": "auto",
+  "awbgains": null,
+  "brightness": 0,
+  "contrast": 1,
+  "saturation": 1,
+  "sharpness": 1,
+  "autofocus_mode": "continuous",
+  "af_range": "normal",
+  "af_speed": "normal",
+  "af_window": null,
+  "lens_position": null
+}
+```
+
+`quality: "high"` alone sets the stream fields (1920x1080, 30 fps, 5 Mbps, ultrafast, zerolatency, keyframe interval 30). The image and autofocus fields above are explicit. HDR stays off because 1920x1080 is not the 2304x1296 HDR mode.
 
 ## Conflicts and uninstall
 

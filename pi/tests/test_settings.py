@@ -12,8 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pidentify.settings import (  # noqa: E402
     SettingsError,
+    build_autofocus_argv,
     build_ffmpeg_argv,
+    build_record_argv,
     build_rpicam_argv,
+    build_snapshot_argv,
     default_settings,
     load_settings,
     merge_patch,
@@ -21,6 +24,10 @@ from pidentify.settings import (  # noqa: E402
     save_settings,
     select_encoder,
 )
+
+IMX708 = {"id": "cam0", "model": "imx708", "modes": "4608x2592 10-bit RGGB"}
+IMX708_NOIR = {"id": "cam0", "model": "imx708_wide_noir", "modes": "4608x2592 10-bit RGGB"}
+IMX477 = {"id": "cam0", "model": "imx477", "modes": "4056x3040 12-bit RGGB"}
 
 
 class SettingsTest(unittest.TestCase):
@@ -89,7 +96,7 @@ class SettingsTest(unittest.TestCase):
                 "gain": 1.5,
             },
         )
-        cfg["extra_args"] = ["--denoise", "off"]
+        cfg["extra_args"] = ["--verbose"]
         argv = build_rpicam_argv(0, cfg, low_latency=True)
         self.assertIsInstance(argv, list)
         self.assertEqual(argv[-2:], ["-o", "-"])
@@ -100,6 +107,7 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("--low-latency", argv)
         self.assertIn("--hflip", argv)
         self.assertIn("--hdr", argv)
+        self.assertIn("--verbose", argv)
         self.assertEqual(argv[argv.index("--camera") + 1], "0")
         self.assertNotIn("--output", argv)
         joined = " ".join(argv)
@@ -149,6 +157,8 @@ class SettingsTest(unittest.TestCase):
                 "libx264",
                 "--libav-format",
                 "mpegts",
+                "--libav-video-codec-opts",
+                "preset=ultrafast:tune=zerolatency",
                 "--width",
                 "1280",
                 "--height",
@@ -187,6 +197,107 @@ class SettingsTest(unittest.TestCase):
     def test_odd_resolution_rejected(self):
         with self.assertRaises(SettingsError):
             merge_patch(default_settings(), {"width": 1281})
+
+    def test_imx708_quality_and_controls_build_a_libav_command(self):
+        cfg = merge_patch(
+            default_settings(),
+            {
+                "quality": "high",
+                "denoise": "cdn_fast",
+                "exposure": "short",
+                "metering": "spot",
+                "autofocus_mode": "continuous",
+                "af_range": "normal",
+                "af_speed": "fast",
+                "af_window": {"x": 0.2, "y": 0.1, "w": 0.5, "h": 0.4},
+                "shutter": 0,
+                "gain": 0,
+            },
+            camera=IMX708,
+        )
+        self.assertEqual(cfg["width"], 1920)
+        self.assertEqual(cfg["height"], 1080)
+        self.assertEqual(cfg["fps"], 30)
+        self.assertEqual(cfg["bitrate"], 5_000_000)
+        self.assertEqual(cfg["x264_preset"], "ultrafast")
+        self.assertEqual(cfg["x264_tune"], "zerolatency")
+        self.assertEqual(cfg["keyframe_interval"], 30)
+        argv = build_rpicam_argv(0, cfg, encoder="libav", low_latency=False)
+        self.assertEqual(argv[argv.index("--libav-video-codec-opts") + 1], "preset=ultrafast:tune=zerolatency")
+        self.assertEqual(argv[argv.index("--width") + 1], "1920")
+        self.assertEqual(argv[argv.index("--intra") + 1], "30")
+        self.assertEqual(argv[argv.index("--denoise") + 1], "cdn_fast")
+        self.assertEqual(argv[argv.index("--exposure") + 1], "short")
+        self.assertEqual(argv[argv.index("--metering") + 1], "spot")
+        self.assertEqual(argv[argv.index("--autofocus-mode") + 1], "continuous")
+        self.assertEqual(argv[argv.index("--autofocus-range") + 1], "normal")
+        self.assertEqual(argv[argv.index("--autofocus-speed") + 1], "fast")
+        self.assertEqual(argv[argv.index("--autofocus-window") + 1], "0.2,0.1,0.5,0.4")
+        self.assertNotIn("--shutter", argv)
+        self.assertNotIn("--gain", argv)
+        self.assertEqual(argv[-2:], ["-o", "-"])
+
+    def test_imx708_hdr_only_at_2304x1296_and_noir_awb(self):
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"hdr": "sensor"}, camera=IMX708)
+        self.assertIn("2304x1296", caught.exception.fields["hdr"])
+        hdr = merge_patch(
+            default_settings(),
+            {"width": 2304, "height": 1296, "fps": 30, "hdr": "sensor"},
+            camera=IMX708,
+        )
+        self.assertEqual(hdr["hdr"], "sensor")
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"awb": "greyworld"}, camera=IMX708)
+        self.assertIn("NoIR", caught.exception.fields["awb"])
+        noir = merge_patch(default_settings(), {"awb": "greyworld"}, camera=IMX708_NOIR)
+        self.assertEqual(noir["awb"], "greyworld")
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"width": 640, "height": 360}, camera=IMX708)
+        self.assertIn("mode list", caught.exception.fields["width"])
+
+    def test_imx477_rejects_autofocus_and_hdr(self):
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"autofocus_mode": "continuous"}, camera=IMX477)
+        self.assertIn("not supported", caught.exception.fields["autofocus_mode"])
+        self.assertIn("imx477", caught.exception.fields["autofocus_mode"])
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"hdr": "auto"}, camera=IMX477)
+        self.assertIn("not supported", caught.exception.fields["hdr"])
+        kept = merge_patch(
+            default_settings(),
+            {"width": 2028, "height": 1520, "fps": 30, "awb": "daylight", "awbgains": None},
+            camera=IMX477,
+        )
+        self.assertEqual(kept["width"], 2028)
+        self.assertIsNone(kept["autofocus_mode"])
+        preset = merge_patch(default_settings(), {"quality": "max"}, camera=IMX477)
+        self.assertEqual((preset["width"], preset["height"]), (2028, 1520))
+        self.assertEqual(preset["bitrate"], 8_000_000)
+
+    def test_awbgains_require_custom_and_still_autofocus_commands(self):
+        with self.assertRaises(SettingsError) as caught:
+            merge_patch(default_settings(), {"awbgains": [1.2, 1.8]}, camera=IMX708)
+        self.assertIn("custom", caught.exception.fields["awbgains"])
+        cfg = merge_patch(
+            default_settings(),
+            {"awb": "custom", "awbgains": [1.2, 1.8]},
+            camera=IMX708,
+        )
+        argv = build_rpicam_argv(0, cfg, encoder="hardware")
+        self.assertEqual(argv[argv.index("--awbgains") + 1], "1.2,1.8")
+        self.assertNotIn("--libav-video-codec-opts", argv)
+        still = build_snapshot_argv(0, cfg, width=4608, height=2592, jpeg_quality=90)
+        self.assertIn("--quality", still)
+        self.assertEqual(still[-2:], ["-o", "-"])
+        self.assertNotIn("--hdr", still)
+        focus = build_autofocus_argv(0, cfg)
+        self.assertIn("--autofocus-on-capture", focus)
+        self.assertIn("--metadata", focus)
+        record = build_record_argv("cam0", 5, "/var/lib/pidentify/captures/cam0-20261025T101530Z.mp4")
+        self.assertEqual(record[record.index("-c") + 1], "copy")
+        self.assertTrue(record[-1].endswith(".mp4"))
+        self.assertNotIn("rpicam", " ".join(record))
 
 
 if __name__ == "__main__":

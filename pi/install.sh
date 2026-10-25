@@ -465,6 +465,7 @@ do_priv mkdir -p \
   "$(dest /etc/avahi/services)" \
   "$(dest /etc/systemd/system)" \
   "$(dest /var/lib/pidentify)" \
+  "$(dest /var/lib/pidentify/captures)" \
   "$(dest /usr/local/bin)" \
   "$(dest /var/log)"
 
@@ -818,6 +819,7 @@ for cam, url in (node.get("push_targets") or {}).items():
     print("%s %s" % (cam, url))' "${node_json}")
 fi
 say "camctl:  http://<host>:8555/health   (all IPv4 interfaces, including tailscale0)"
+say "controls: http://<host>:8555/ui       (same port; Tailscale MagicDNS works)"
 say "MediaMTX API: http://<host>:9997/v3/paths/list"
 say "No port forwarding and no UPnP. Streams are LAN and tailnet only."
 say "units: pidentify-mediamtx.service, pidentify-camctl.service"

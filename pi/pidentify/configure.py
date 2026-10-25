@@ -158,7 +158,13 @@ def configure_node(
 
     save_node_config(
         config_path,
-        {"mode": mode, "name": info["name"], "push_url": stored_push},
+        {
+            "mode": mode,
+            "name": info["name"],
+            "push_url": stored_push,
+            "control_token": existing_cfg.get("control_token", ""),
+            "capture_limit_mb": existing_cfg.get("capture_limit_mb", ""),
+        },
     )
 
     yml_path = os.path.join(config_dir, "mediamtx.yml")

@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from pidentify.hostname import dns_safe_hostname
 from pidentify.settings import CAMERA_IDS
 
-_KEYS = ("mode", "name", "push_url")
+_KEYS = ("mode", "name", "push_url", "control_token", "capture_limit_mb")
 _PREFIX = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62})$")
 
 
@@ -24,7 +24,7 @@ class ConfigError(ValueError):
 
 
 def empty_config() -> dict[str, str]:
-    return {"mode": "local", "name": "", "push_url": ""}
+    return {"mode": "local", "name": "", "push_url": "", "control_token": "", "capture_limit_mb": ""}
 
 
 def load_node_config(path: str) -> dict[str, str]:
@@ -42,6 +42,12 @@ def load_node_config(path: str) -> dict[str, str]:
                 result[key] = value.strip()
     if result["mode"] not in ("local", "push"):
         raise ConfigError(f"mode in {path} must be local or push, not {result['mode']!r}")
+    token = result["control_token"]
+    if token and (any(char.isspace() for char in token) or len(token) > 256):
+        raise ConfigError("control_token must be a single token with no spaces")
+    limit = result["capture_limit_mb"]
+    if limit and (not limit.isdigit() or not 1 <= int(limit) <= 100000):
+        raise ConfigError("capture_limit_mb must be a whole number of megabytes")
     return result
 
 
@@ -51,15 +57,22 @@ def render_node_config(cfg: dict[str, str]) -> str:
         raise ConfigError(f"mode must be local or push, not {mode!r}")
     name = cfg.get("name") or ""
     push_url = cfg.get("push_url") or ""
+    token = cfg.get("control_token") or ""
+    limit = cfg.get("capture_limit_mb") or "512"
     return (
         "# pidentify node configuration. Rewritten by install.sh.\n"
         "# Run install.sh again with no --name, --push-to, or --local to keep these values.\n"
         "# mode=local  RTSP on this Pi, camera open only while a viewer is connected.\n"
         "# mode=push   also publish continuously to push_url-cam0 and push_url-cam1.\n"
         "# Switch back to local with: install.sh --local\n"
+        "# control_token is optional. Empty disables camctl authentication.\n"
+        "# When set, camctl requires Authorization: Bearer <token> or HTTP Basic password.\n"
+        "# capture_limit_mb caps /var/lib/pidentify/captures. Oldest clips are removed first.\n"
         f"mode={mode}\n"
         f"name={name}\n"
         f"push_url={push_url}\n"
+        f"control_token={token}\n"
+        f"capture_limit_mb={limit}\n"
     )
 
 
@@ -130,6 +143,8 @@ def format_status(config_dir: str) -> str:
     lines.append(f"mode: {cfg['mode']}")
     lines.append(f"name: {cfg['name'] or '(unset, derived from the system hostname)'}")
     lines.append(f"push_url: {cfg['push_url'] or '(none)'}")
+    lines.append("control_token: {0}".format("set" if cfg.get("control_token") else "off"))
+    lines.append("capture_limit_mb: {0}".format(cfg.get("capture_limit_mb") or "512"))
     node_path = os.path.join(config_dir, "node.json")
     if os.path.exists(node_path):
         try:

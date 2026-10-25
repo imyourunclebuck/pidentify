@@ -54,6 +54,9 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(cameras[0].model, "imx708_wide")
         self.assertIn("i2c@80000", cameras[0].device)
         self.assertEqual(cameras[1].model, "imx708")
+        self.assertEqual(cameras[0].resolutions[0][0:2], (1536, 864))
+        self.assertAlmostEqual(cameras[0].resolutions[0][2], 120.13)
+        self.assertEqual(cameras[1].resolutions[0][0:2], (2304, 1296))
 
     def test_index_one_only_and_ignores_extra(self):
         cameras, warnings = parse_list_cameras((FIXTURES / "cam1_only.txt").read_text(encoding="utf-8"))
