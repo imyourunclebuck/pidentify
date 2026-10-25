@@ -155,6 +155,8 @@ python3 -m unittest discover -s pi/tests -v
 shellcheck -x pi/install.sh pi/uninstall.sh pi/bin/*
 ```
 
+The Python in `pi/` targets 3.9 and newer (Bullseye 3.9, Bookworm 3.11, Trixie 3.13). Annotations use `from __future__ import annotations`, so `X | Y` unions are not evaluated at runtime. `install.sh` byte-compiles `pidentify/` before it changes the system, and any failed step prints `INSTALL FAILED at step N` and exits non-zero.
+
 `PIDENTIFY_ROOT` is a dry-run: no apt, useradd, or systemctl, and `--take-over` is ignored. `PIDENTIFY_SKIP_DOWNLOAD=1` skips the arm64 MediaMTX binary (required off a Pi). `PIDENTIFY_HOSTNAME` and `PIDENTIFY_LIST_CAMERAS_FILE` feed the hostname and a saved `rpicam-hello` transcript. `PIDENTIFY_ARCHIVE_URL` is a `file://` or `http://` tarball used instead of GitHub when the piped script has to download the rest of `pi/`. Installer progress is written to stderr so that download step can print the extracted path on stdout.
 
-Not tested on a Pi: a real `rpicam-vid`, the arm64 MediaMTX process, an Avahi restart, systemd user and groups, ffprobe against a live path, apt install and remove, or a Jetson client that only speaks RTSP/UDP. TCP-only RTSP is deliberate. The first viewer can wait up to `runOnDemandStartTimeout` (20s) while the camera opens.
+TEST (Pi 5, Trixie, Python 3.13) ran `40ef8e4` end to end: 1280x720@30 H.264, clean conflicts, the camctl index, and `rpicam-vid` at about 55% CPU. This revision compiles on Python 3.9 and newer before any system change and has not been re-run on a Pi. A Jetson client that only speaks RTSP/UDP is still untested. TCP-only RTSP is deliberate. The first viewer can wait up to `runOnDemandStartTimeout` (20s) while the camera opens.

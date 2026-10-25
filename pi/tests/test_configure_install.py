@@ -180,6 +180,43 @@ class InstallDryRunTest(unittest.TestCase):
 
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_syntax_error_aborts_before_any_install_writes(self):
+        import shutil
+        import tempfile
+
+        src = Path(tempfile.mkdtemp())
+        root = Path(tempfile.mkdtemp())
+        try:
+            shutil.copytree(PI / "pidentify", src / "pidentify")
+            broken = src / "pidentify" / "avahi_conf.py"
+            broken.write_text(broken.read_text(encoding="utf-8") + "\n(\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PIDENTIFY_SRC": str(src),
+                    "PIDENTIFY_ROOT": str(root),
+                    "PIDENTIFY_SKIP_DOWNLOAD": "1",
+                    "PIDENTIFY_HOSTNAME": "pi",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(PI / "install.sh")],
+                check=False,
+                env=env,
+                cwd=str(REPO),
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr.count("INSTALL FAILED"), 1)
+            self.assertIn("INSTALL FAILED at step 1/", result.stderr)
+            self.assertFalse((root / "etc" / "pidentify").exists())
+            self.assertFalse((root / "opt" / "pidentify").exists())
+            self.assertFalse((root / "etc" / "systemd").exists())
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_scripts_are_executable(self):
         for name in ("install.sh", "uninstall.sh"):
             mode = (PI / name).stat().st_mode

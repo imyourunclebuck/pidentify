@@ -14,6 +14,9 @@ from pidentify.hostname import dns_safe_hostname
 _SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 _HOST = re.compile(r"^(\s*)#?\s*host-name\s*=.*$")
 _DOMAIN = re.compile(r"^\s*domain-name\s*=\s*(\S+)\s*$")
+# xml.sax escape does not quote " unless asked. The dict stays outside the
+# f-string: nesting the same quote inside an f-string needs Python 3.12.
+_XML_QUOTES = {'"': "&quot;"}
 
 DEFAULT_AVAHI_CONF = """[server]
 #host-name=foo
@@ -172,7 +175,10 @@ def render_service(
         "node": node,
     }
     body = "\n".join(
-        f"    <txt-record>{escape(key)}={escape(value, {'"': '&quot;'})}</txt-record>"
+        "    <txt-record>{key}={value}</txt-record>".format(
+            key=escape(key),
+            value=escape(value, _XML_QUOTES),
+        )
         for key, value in records.items()
     )
     visible_name = service_name if service_name else node

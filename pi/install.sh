@@ -22,7 +22,9 @@
 # Does not install Tailscale, does not edit /etc/hostname or /etc/hosts,
 # does not edit /boot/firmware/config.txt, and does not configure port
 # forwarding or UPnP.
-set -euo pipefail
+# -E so the ERR trap also runs when a function such as do_priv fails.
+# Without it, a Python traceback in configure would exit 1 with no summary.
+set -Eeuo pipefail
 umask 022
 
 MEDIAMTX_VERSION="v1.21.2"
@@ -69,6 +71,7 @@ die() {
   if [[ -n "${LOG_FILE}" && -w "${LOG_FILE}" ]]; then
     printf 'ERROR: %s\n' "$*" >>"${LOG_FILE}"
   fi
+  fail_line 1
   exit 1
 }
 
@@ -87,6 +90,35 @@ step() {
   say ""
   say "==> [${STEP_N}/${TOTAL_STEPS}] $*"
 }
+
+# Printed for every failed command, including ones inside do_priv.
+# Command substitutions are subshells: they exit quietly so the parent
+# prints this once instead of twice.
+fail_line() {
+  local code="${1:-1}"
+  local message
+  if [[ "${STEP_N:-0}" -eq 0 ]]; then
+    message="INSTALL FAILED before step 1 (exit ${code})"
+  else
+    message="INSTALL FAILED at step ${STEP_N}/${TOTAL_STEPS} (exit ${code})"
+  fi
+  printf '%s\n' "${message}" >&2
+  if [[ -n "${LOG_FILE:-}" && -w "${LOG_FILE}" ]]; then
+    printf '%s\n' "${message}" >>"${LOG_FILE}" || true
+  fi
+}
+
+on_err() {
+  local status=$?
+  # A failing command substitution is its own shell. Exit quietly there so
+  # the parent shell prints INSTALL FAILED once.
+  if [[ "${BASH_SUBSHELL}" -ne 0 ]]; then
+    exit "${status}"
+  fi
+  fail_line "${status}"
+  exit "${status}"
+}
+trap on_err ERR
 
 validate_ref() {
   local ref="$1"
@@ -410,6 +442,14 @@ fi
 if ! command -v python3 >/dev/null 2>&1; then
   die "python3 is required"
 fi
+py_ver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+say "python: ${py_ver} (sources must compile on 3.9 and newer)"
+pycache="$(mktemp -d)"
+if ! env PYTHONPYCACHEPREFIX="${pycache}" python3 -m compileall -q "${SRC}/pidentify"; then
+  rm -rf "${pycache}"
+  die "pi/pidentify did not compile with Python ${py_ver}. Bookworm is 3.11 and Bullseye is 3.9; a syntax error has to be fixed before anything is installed. The compiler output is above."
+fi
+rm -rf "${pycache}"
 if [[ "${arch}" != "aarch64" && "${PIDENTIFY_SKIP_DOWNLOAD:-}" != "1" ]]; then
   die "MediaMTX is installed from the linux arm64 release, but uname -m is ${arch}. Refusing to install the wrong binary."
 fi

@@ -92,6 +92,9 @@ class AvahiTest(unittest.TestCase):
         self.assertIn("camctl=8555", xml)
         self.assertIn("api=9997", xml)
         self.assertIn("node=pi5_cam_2_myrtle", xml)
+        quoted = render_service(paths=["cam0"], node='pi "5"')
+        self.assertIn("node=pi &quot;5&quot;", quoted)
+        self.assertNotIn('node=pi "5"', quoted)
 
 
 class LanTest(unittest.TestCase):
